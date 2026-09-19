@@ -1,0 +1,17 @@
+## Compiled output files
+bin/
+obj/
+
+## User-specific files
+*.rsuser
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+## IDE files
+.vscode/
+.vs/
+
+## Sensitive configuration files
+appsettings.Development.json
