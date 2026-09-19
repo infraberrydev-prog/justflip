@@ -8,13 +8,16 @@ using Scalar.AspNetCore;
 using System.Text;
 
 AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
-var builder = WebApplication.CreateBuilder(args); builder.Services.AddCors(options =>
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowAll", policy =>
     {
-        policy.AllowAnyOrigin()
+        policy.SetIsOriginAllowed(origin => true) // <--- This handles dynamic URLs
               .AllowAnyHeader()
-              .AllowAnyMethod();
+              .AllowAnyMethod()
+              .AllowCredentials();
     });
 });
 builder.Services.AddControllers();
@@ -98,11 +101,8 @@ using (var scope = app.Services.CreateScope())
     await db.Database.MigrateAsync();
 }
 
-if (app.Environment.IsDevelopment())
-{
-    app.MapOpenApi();
-    app.MapScalarApiReference();
-}
+app.MapOpenApi();
+app.MapScalarApiReference();
 app.UseCors("AllowAll");
 
 app.UseRouting();
