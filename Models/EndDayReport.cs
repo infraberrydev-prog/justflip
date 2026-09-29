@@ -8,7 +8,7 @@ namespace JustFlip.Models
         public int Id { get; set; }
 
         public int BranchId { get; set; }
-        public Branch? Branch { get; set; }
+        public required string BranchCode { get; set; }
 
         [Required]
         public string ReportName { get; set; } = null!;
@@ -19,6 +19,7 @@ namespace JustFlip.Models
         public string CashierName { get; set; } = null!;
 
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+        public DateTime? LastDateUpdated { get; set; }
 
         public virtual ICollection<EndDayReportRow> Rows { get; set; } = new List<EndDayReportRow>();
     }
@@ -29,6 +30,7 @@ namespace JustFlip.Models
 
         public int EndDayReportId { get; set; }
         public EndDayReport? EndDayReport { get; set; }
+        public required string BranchCode { get; set; }
 
         [Required]
         public string EmployeeName { get; set; } = null!;

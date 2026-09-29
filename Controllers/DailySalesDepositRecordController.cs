@@ -1,9 +1,11 @@
 ﻿using ClosedXML.Excel;
+using DocumentFormat.OpenXml.Drawing.Spreadsheet;
 using JustFlip.Class;
 using JustFlip.DTO;
 using JustFlip.Models;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.OutputCaching;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Org.BouncyCastle.Asn1.Ocsp;
@@ -19,13 +21,21 @@ namespace JustFlip.Controllers
     public class DailySalesDepositRecordController : ControllerBase
     {
         private readonly JustFlipDbContext _context;
+        private readonly IOutputCacheStore _cacheStore;
 
-        public DailySalesDepositRecordController(JustFlipDbContext context)
+        private const string ReportsCacheTag = "reports-cache-tag";
+
+        public DailySalesDepositRecordController(JustFlipDbContext context, IOutputCacheStore cacheStore)
         {
             _context = context;
+            _cacheStore = cacheStore;
         }
 
         [HttpPost("save-report")]
+        [EnableRateLimiting("StrictWritePolicy")]
+        [ProducesResponseType(typeof(SuccessfulResponse), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
         public async Task<IActionResult> SubmitRecord([FromBody] CreateDailySalesDepositRecordDto dto)
         {
             // 1. FluentValidation Process
@@ -95,7 +105,21 @@ namespace JustFlip.Controllers
         }
 
         [HttpGet("get-all-reports")]
-        public async Task<IActionResult> GetRecords()
+        [OutputCache(PolicyName = "ReportsListCache", Tags = [ReportsCacheTag])]
+        [ProducesResponseType(typeof(PagedReportResponse), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> GetRecords(
+            [FromQuery] string? search,
+            [FromQuery] DateOnly? startDateCreated,
+            [FromQuery] DateOnly? endDateCreated,
+            [FromQuery] decimal? minRevenue,
+            [FromQuery] decimal? maxRevenue,
+            [FromQuery] string? lastUpdated = "ALL", // Short codes: TOD, L7D, L30D, TM, ALL
+            [FromQuery] int page = 1,
+            [FromQuery] int pageSize = 10,
+            [FromQuery] string? sortBy = "createdAt", // Default Column
+            [FromQuery] string? sortOrder = "DESC")   // Direction: ASC, DESC
         {
             try
             {
@@ -105,47 +129,142 @@ namespace JustFlip.Controllers
 
                 if (string.IsNullOrEmpty(branchIdClaim))
                 {
-                    return Unauthorized(new { message = "Branch configuration missing from token." });
+                    return Unauthorized(new ErrorResponse(401, "UNAUTHORIZED", "Branch configuration missing from token."));
                 }
 
                 int userBranchId = int.Parse(branchIdClaim);
 
-                // 2. Base query: I-load ang records
-                var query = _context.DailySalesDepositRecords.AsQueryable();
+                if (page < 1) page = 1;
+                if (pageSize < 1) pageSize = 10;
 
-                // Security Filter: Kung hindi Admin, piliting ipakita lang ang sariling branch data
+                // 2. Base query: I-load ang records
+                var query = _context.DailySalesDepositRecords.AsNoTracking();
+
+                // 🔒 Multi-Branch Security Filter: Kung hindi Admin, sariling branch data lang ang puwedeng lumabas
                 if (userRole != "Admin")
                 {
                     query = query.Where(r => r.BranchId == userBranchId);
                 }
 
-                var records = await query
-                    .OrderByDescending(r => r.CreatedAt)
-                    .Select(r => new DailySalesDepositRecordListDto
+                // 3. Search Filter (by Report Name)
+                if (!string.IsNullOrWhiteSpace(search))
+                {
+                    query = query.Where(r => r.ReportName.ToLower().Contains(search.ToLower()));
+                }
+
+                // 4. Date Created Range Filter
+                if (startDateCreated.HasValue)
+                    query = query.Where(r => r.CreatedAt >= startDateCreated.Value.ToDateTime(TimeOnly.MinValue));
+
+                if (endDateCreated.HasValue)
+                    query = query.Where(r => r.CreatedAt <= endDateCreated.Value.ToDateTime(TimeOnly.MaxValue));
+
+                // 5. Min/Max Revenue Filter (Total Gross Cash per Report)
+                if (minRevenue.HasValue)
+                    query = query.Where(r => r.Rows.Sum(row => (decimal?)row.TotalGrossCash) >= minRevenue.Value);
+
+                if (maxRevenue.HasValue)
+                    query = query.Where(r => r.Rows.Sum(row => (decimal?)row.TotalGrossCash) <= maxRevenue.Value);
+
+                // 6. Last Updated Filter (Short Codes)
+                if (!string.IsNullOrWhiteSpace(lastUpdated) && !lastUpdated.Equals("ALL", StringComparison.OrdinalIgnoreCase))
+                {
+                    var nowUtc = DateTime.UtcNow;
+
+                    query = lastUpdated.ToUpper() switch
                     {
-                        Id = r.Id,
-                        ReportId = $"DS{r.Id:D5}",
-                        ReportName = r.ReportName,
-                        DateAndTimeCreated = r.CreatedAt.ToString("MMM dd, yyyy"),
-                        TotalGrossCash = r.Rows.Sum(row => row.TotalGrossCash),
-                        TotalCreditCardPayment = r.Rows.Sum(row => row.CreditCardPayment ?? 0),
-                        TotalSalaryAdvance = r.Rows.Sum(row => row.SalaryAdvance ?? 0),
-                        TotalCommission = r.Rows.Sum(row => row.Commission),
-                        TotalExpenses = r.Rows.Sum(row => row.Expenses ?? 0),
-                        TotalAmountExpenses = r.Rows.Sum(row => row.TotalExpenses),
-                        TotalAmountDeposited = r.Rows.Sum(row => row.AmountDeposited)
-                    })
+                        "TOD" => query.Where(r => r.LastDateUpdated.HasValue && r.LastDateUpdated.Value.Date == nowUtc.Date),
+                        "L7D" => query.Where(r => r.LastDateUpdated.HasValue && r.LastDateUpdated.Value >= nowUtc.AddDays(-7)),
+                        "L30D" => query.Where(r => r.LastDateUpdated.HasValue && r.LastDateUpdated.Value >= nowUtc.AddDays(-30)),
+                        "TM" => query.Where(r => r.LastDateUpdated.HasValue &&
+                                                  r.LastDateUpdated.Value.Year == nowUtc.Year &&
+                                                  r.LastDateUpdated.Value.Month == nowUtc.Month),
+                        _ => query
+                    };
+                }
+
+                int totalRecords = await query.CountAsync();
+
+                // 7. Sorting Logic (Aligned 1:1 sa UI Dropdown Options)
+                bool isDesc = string.Equals(sortOrder, "DESC", StringComparison.OrdinalIgnoreCase);
+
+                query = sortBy?.ToLower() switch
+                {
+                    "totalgross" or "gross" => isDesc
+                        ? query.OrderByDescending(r => r.Rows.Sum(row => (decimal?)row.TotalGrossCash) ?? 0)
+                        : query.OrderBy(r => r.Rows.Sum(row => (decimal?)row.TotalGrossCash) ?? 0),
+
+                    "amountdeposited" or "deposited" => isDesc
+                        ? query.OrderByDescending(r => r.Rows.Sum(row => (decimal?)row.AmountDeposited) ?? 0)
+                        : query.OrderBy(r => r.Rows.Sum(row => (decimal?)row.AmountDeposited) ?? 0),
+
+                    "totalexpenses" => isDesc
+                        ? query.OrderByDescending(r => r.Rows.Sum(row => (decimal?)row.TotalExpenses) ?? 0)
+                        : query.OrderBy(r => r.Rows.Sum(row => (decimal?)row.TotalExpenses) ?? 0),
+
+                    "creditcard" => isDesc
+                        ? query.OrderByDescending(r => r.Rows.Sum(row => (decimal?)row.CreditCardPayment) ?? 0)
+                        : query.OrderBy(r => r.Rows.Sum(row => (decimal?)row.CreditCardPayment) ?? 0),
+
+                    "salaryadvance" => isDesc
+                        ? query.OrderByDescending(r => r.Rows.Sum(row => (decimal?)row.SalaryAdvance) ?? 0)
+                        : query.OrderBy(r => r.Rows.Sum(row => (decimal?)row.SalaryAdvance) ?? 0),
+
+                    "commission" => isDesc
+                        ? query.OrderByDescending(r => r.Rows.Sum(row => (decimal?)row.Commission) ?? 0)
+                        : query.OrderBy(r => r.Rows.Sum(row => (decimal?)row.Commission) ?? 0),
+
+                    "expenses" => isDesc
+                        ? query.OrderByDescending(r => r.Rows.Sum(row => (decimal?)row.Expenses) ?? 0)
+                        : query.OrderBy(r => r.Rows.Sum(row => (decimal?)row.Expenses) ?? 0),
+
+                    "reportname" or "name" => isDesc
+                        ? query.OrderByDescending(r => r.ReportName)
+                        : query.OrderBy(r => r.ReportName),
+
+                    "lastdateupdated" or "lastupdated" => isDesc
+                        ? query.OrderByDescending(r => r.LastDateUpdated ?? r.CreatedAt)
+                        : query.OrderBy(r => r.LastDateUpdated ?? r.CreatedAt),
+
+                    _ => isDesc // Default: CreatedAt
+                        ? query.OrderByDescending(r => r.CreatedAt)
+                        : query.OrderBy(r => r.CreatedAt)
+                };
+
+                // 8. Pagination at Mapping sa Final Response DTO
+                var records = await query
+                    .Skip((page - 1) * pageSize) // 👈 Naayos na ang Skip expression
+                    .Take(pageSize)
+                    .Select(r => new DailySalesReportListDto(
+                        r.Id,
+                        $"DS{r.Id:D5}",
+                        r.ReportName,
+                        r.CreatedAt.ToString("MMM dd, yyyy"),
+                        r.Rows.Sum(row => row.TotalGrossCash),
+                        r.Rows.Sum(row => row.CreditCardPayment ?? 0),
+                        r.Rows.Sum(row => row.SalaryAdvance ?? 0),
+                        r.Rows.Sum(row => row.Commission),
+                        r.Rows.Sum(row => row.Expenses ?? 0),
+                        r.Rows.Sum(row => row.TotalExpenses),
+                        r.Rows.Sum(row => row.AmountDeposited)
+                    ))
                     .ToListAsync();
 
-                return Ok(records);
+                int totalPages = (int)Math.Ceiling((double)totalRecords / pageSize);
+
+                return Ok(new PagedReportResponse(records, totalRecords, page, totalPages == 0 ? 1 : totalPages, pageSize));
             }
             catch (Exception)
             {
-                return StatusCode(500, new { message = "An error occurred while fetching deposit records." });
+                return StatusCode(500, new ErrorResponse(500, "INTERNAL_SERVER_ERROR", "An error occurred while fetching deposit records."));
             }
         }
 
         [HttpGet("{id:int}/details")]
+        [OutputCache(Duration = 300, Tags = [ReportsCacheTag])]
+        [ProducesResponseType(typeof(DailySalesDepositRecordDetailDto), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
         public async Task<IActionResult> GetRecordDetailsById(int id)
         {
             try
@@ -277,7 +396,11 @@ namespace JustFlip.Controllers
         }
 
         [HttpPost("rows/delete/{rowId:int}")]
-        public async Task<IActionResult> DeleteRecord(int id)
+        [EnableRateLimiting("StrictWritePolicy")]
+        [ProducesResponseType(typeof(SuccessfulResponse), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> DeleteRecord(int rowId)
         {
             try
             {
@@ -296,7 +419,7 @@ namespace JustFlip.Controllers
 
                 var record = await _context.DailySalesDepositRecordRows
                     .Include(r => r.DailySalesDepositRecord)
-                    .FirstOrDefaultAsync(r => r.Id == id);
+                    .FirstOrDefaultAsync(r => r.Id == rowId);
 
                 if (record == null)
                 {
@@ -316,7 +439,7 @@ namespace JustFlip.Controllers
                 _context.DailySalesDepositRecordRows.Remove(record);
                 await _context.SaveChangesAsync();
 
-                return Ok(new { message = "The entire report and its dynamic rows have been successfully deleted." });
+                return Ok(new SuccessfulResponse { message = $"Successfully deleted row {rowId}!" });
             }
             catch (Exception)
             {

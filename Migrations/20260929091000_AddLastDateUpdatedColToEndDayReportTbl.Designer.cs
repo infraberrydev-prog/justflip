@@ -3,6 +3,7 @@ using System;
 using JustFlip;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace JustFlip.Migrations
 {
     [DbContext(typeof(JustFlipDbContext))]
-    partial class JustFlipDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260929091000_AddLastDateUpdatedColToEndDayReportTbl")]
+    partial class AddLastDateUpdatedColToEndDayReportTbl
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
