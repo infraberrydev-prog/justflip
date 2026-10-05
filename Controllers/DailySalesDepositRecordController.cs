@@ -12,6 +12,7 @@ using Org.BouncyCastle.Asn1.Ocsp;
 using System.Drawing;
 using System.IO.Compression;
 using System.Security.Claims;
+using System.Text.Json;
 
 namespace JustFlip.Controllers
 {
@@ -323,127 +324,326 @@ namespace JustFlip.Controllers
         [HttpPost("rows/update/{rowId:int}")]
         [EnableRateLimiting("StrictWritePolicy")]
         [ProducesResponseType(typeof(SuccessfulResponse), StatusCodes.Status200OK)]
-        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status403Forbidden)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
-        public async Task<IActionResult> UpdateRecord(int rowId, [FromBody] UpdateSaveSalesRecordRowDto request)
+        public async Task<IActionResult> UpdateSingleRow(int rowId, [FromBody] UpdateEndDayReportRowDto request)
         {
-            // 1. FluentValidation Process
-            //var validator = new UpdateSaveSalesRecordRowDtoValidator();
-            //var validatorResult = await validator.ValidateAsync(request);
-
-            //if (!validatorResult.IsValid)
-            //{
-            //    var firstError = validatorResult.Errors.First();
-            //    return BadRequest(new ErrorResponse(400, firstError.ErrorCode, firstError.ErrorMessage));
-            //}
-
-            // 2. Kuhanin ang User Claims (Role at BranchId galing sa JWT Token)
-            var userRole = User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value;
-            var branchIdClaim = User.FindFirst("BranchId")?.Value;
-
-            if (string.IsNullOrEmpty(branchIdClaim))
+            try
             {
-                return Unauthorized(new ErrorResponse(401, "UNAUTHORIZED", "Branch assignment missing from authentication token."));
+                var userRole = User.FindFirst(ClaimTypes.Role)?.Value;
+                var branchIdClaim = User.FindFirst("BranchId")?.Value;
+                var modifiedBy = User.FindFirst(ClaimTypes.Name)?.Value
+                              ?? User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                              ?? "System";
+
+                if (string.IsNullOrEmpty(branchIdClaim))
+                {
+                    return Unauthorized(new ErrorResponse(401, "UNAUTHORIZED", "Branch assignment missing from authentication token."));
+                }
+
+                int userBranchId = int.Parse(branchIdClaim);
+
+                var row = await _context.EndDayReportRows
+                    .Include(r => r.EndDayReport)
+                    .FirstOrDefaultAsync(r => r.Id == rowId);
+
+                if (row == null)
+                {
+                    return NotFound(new ErrorResponse(404, "NOT_FOUND", $"End day report row with ID {rowId} was not found."));
+                }
+
+                if (userRole != "Admin" && row.EndDayReport?.BranchId != userBranchId)
+                {
+                    return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to modify records from another branch."));
+                }
+
+                // 📝 Capture Old Values bago i-mutate ang entity
+                var oldValuesObj = new
+                {
+                    row.EmployeeName,
+                    row.GrossAmount,
+                    row.CreditCardPayment,
+                    row.Commission,
+                    row.SalonExpenses,
+                    row.SalaryAdvance
+                };
+
+                // Track changed columns
+                var changedCols = new List<string>();
+                if (row.EmployeeName != request.EmployeeName) changedCols.Add("EmployeeName");
+                if (row.GrossAmount != request.GrossAmount) changedCols.Add("GrossAmount");
+                if (row.CreditCardPayment != request.CreditCardPayment) changedCols.Add("CreditCardPayment");
+                if (row.Commission != request.Commission) changedCols.Add("Commission");
+                if (row.SalonExpenses != request.SalonExpenses) changedCols.Add("SalonExpenses");
+                if (row.SalaryAdvance != request.SalaryAdvance) changedCols.Add("SalaryAdvance");
+
+                // Apply Updates
+                row.EmployeeName = request.EmployeeName;
+                row.GrossAmount = request.GrossAmount;
+                row.CreditCardPayment = request.CreditCardPayment;
+                row.Commission = request.Commission;
+                row.SalonExpenses = request.SalonExpenses;
+                row.SalaryAdvance = request.SalaryAdvance;
+
+                if (row.EndDayReport != null)
+                {
+                    row.EndDayReport.LastDateUpdated = DateTime.UtcNow;
+                }
+
+                // Capture New Values
+                var newValuesObj = new
+                {
+                    row.EmployeeName,
+                    row.GrossAmount,
+                    row.CreditCardPayment,
+                    row.Commission,
+                    row.SalonExpenses,
+                    row.SalaryAdvance
+                };
+
+                // 🛡️ Create AuditLog Record
+                var auditLog = new AuditLogs
+                {
+                    EntityName = nameof(EndDayReportRow),
+                    EntityId = row.Id,
+                    Action = "UPDATE",
+                    ModifiedBy = modifiedBy,
+                    Timestamp = DateTime.UtcNow,
+                    OldValues = JsonSerializer.Serialize(oldValuesObj),
+                    NewValues = JsonSerializer.Serialize(newValuesObj),
+                    ChangedColumns = changedCols.Any() ? string.Join(", ", changedCols) : null
+                };
+
+                _context.AuditLogs.Add(auditLog);
+                await _context.SaveChangesAsync();
+
+                return Ok(new SuccessfulResponse { message = $"Successfully updated row {rowId}!" });
             }
-
-            int userBranchId = int.Parse(branchIdClaim);
-            var userBranchCode = await _context.Branches
-                .Where(r => r.Id == userBranchId)
-                .Select(b => b.BranchCode)
-                .FirstOrDefaultAsync();
-
-            // 3. Hanapin ang mismong Row gamit ang rowId KASAMA ang Parent Record para sa BranchId verification
-            var row = await _context.DailySalesDepositRecordRows
-                .Include(r => r.DailySalesDepositRecord) // 👈 Isinama ang Parent Record reference!
-                .FirstOrDefaultAsync(r => r.Id == rowId);
-
-            if (row == null)
+            catch (Exception)
             {
-                return NotFound(new ErrorResponse(404, "NOT_FOUND", $"The sales deposit row with ID {rowId} was not found."));
+                return StatusCode(500, new ErrorResponse(500, "INTERNAL_SERVER_ERROR", "An error occurred while updating the report row."));
             }
-
-            // 4. 🔒 MULTI-BRANCH SECURITY CHECK
-            // Chine-check kung ang BranchId ng Parent Report ay tumutugma sa BranchId ng naka-login na User
-            if (userRole != "Admin" && row.BranchCode != userBranchCode)
-            {
-                return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to modify records belonging to another branch."));
-            }
-
-            // 5. I-update ang mga properties ng row
-            row.CashierName = request.CashierName;
-            row.ControlNo = request.ControlNo;
-            row.DateOfTransaction = request.DateOfTransaction;
-            row.TotalGrossCash = request.TotalGrossCash;
-            row.CreditCardPayment = request.CreditCardPayment;
-            row.SalaryAdvance = request.SalaryAdvance;
-            row.Commission = request.Commission;
-            row.Expenses = request.Expenses;
-            row.TotalExpenses = request.TotalExpenses;
-            row.AmountDeposited = request.AmountDeposited;
-            row.Remarks = request.Remarks;
-
-            if (row.DailySalesDepositRecord != null)
-            {
-                row.DailySalesDepositRecord.LastDateUpdated = DateTime.UtcNow;
-            }
-
-            // 6. Save changes sa database
-            await _context.SaveChangesAsync();
-
-            return Ok(new SuccessfulResponse { message = $"Successfully updated row {rowId}!" });
         }
 
-        [HttpPost("rows/delete/{rowId:int}")]
+        [HttpPost("delete/{id:int}")]
         [EnableRateLimiting("StrictWritePolicy")]
         [ProducesResponseType(typeof(SuccessfulResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status403Forbidden)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
-        public async Task<IActionResult> DeleteRecord(int rowId)
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> DeleteParentRecord(int id, [FromQuery] string? reason)
         {
+            using var transaction = await _context.Database.BeginTransactionAsync();
             try
             {
                 var userRole = User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value;
                 var branchIdClaim = User.FindFirst("BranchId")?.Value;
+                var modifiedBy = User.FindFirst(System.Security.Claims.ClaimTypes.Name)?.Value
+                              ?? User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
+                              ?? "System";
 
                 if (string.IsNullOrEmpty(branchIdClaim))
                 {
-                    return Unauthorized(new { message = "Branch assignment missing from token." });
+                    return Unauthorized(new ErrorResponse(401, "UNAUTHORIZED", "Branch assignment missing from token."));
                 }
+
                 int userBranchId = int.Parse(branchIdClaim);
                 var userBranchCode = await _context.Branches
                     .Where(r => r.Id == userBranchId)
                     .Select(b => b.BranchCode)
                     .FirstOrDefaultAsync();
 
+                // 1. Fetch parent record kasama ang lahat ng active child rows
+                var parentRecord = await _context.DailySalesDepositRecords
+                    .Include(p => p.Rows)
+                    .FirstOrDefaultAsync(p => p.Id == id);
+
+                if (parentRecord == null)
+                {
+                    return NotFound(new ErrorResponse(404, "NOT_FOUND", "The parent sales deposit report you are trying to delete does not exist."));
+                }
+
+                // 2. Authorization Check
+                if (userRole != "Admin" && parentRecord.BranchCode != userBranchCode)
+                {
+                    return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to delete reports belonging to another branch."));
+                }
+
+                // 3. Move all child rows to DeletedDailySalesDepositRecordRows
+                foreach (var childRow in parentRecord.Rows)
+                {
+                    var archivedChild = new DeletedDailySalesDepositRecordRow
+                    {
+                        OriginalRowId = childRow.Id,
+                        DailySalesDepositRecordId = childRow.DailySalesDepositRecordId,
+                        BranchCode = childRow.BranchCode,
+                        CashierName = childRow.CashierName,
+                        ControlNo = childRow.ControlNo,
+                        DateOfTransaction = childRow.DateOfTransaction,
+                        TotalGrossCash = childRow.TotalGrossCash,
+                        CreditCardPayment = childRow.CreditCardPayment,
+                        SalaryAdvance = childRow.SalaryAdvance,
+                        Commission = childRow.Commission,
+                        Expenses = childRow.Expenses,
+                        TotalExpenses = childRow.TotalExpenses,
+                        AmountDeposited = childRow.AmountDeposited,
+                        Remarks = childRow.Remarks,
+                        DeletedAt = DateTime.UtcNow,
+                        DeletedBy = modifiedBy,
+                        DeletionReason = reason ?? "Parent report deleted"
+                    };
+
+                    _context.DeletedDailySalesDepositRecordRows.Add(archivedChild);
+                }
+
+                // 4. Map parent values to Replica Model
+                var archivedParent = new DeletedDailySalesDepositRecord
+                {
+                    OriginalRecordId = parentRecord.Id,
+                    BranchId = parentRecord.BranchId,
+                    BranchCode = parentRecord.BranchCode,
+                    ReportName = parentRecord.ReportName,
+                    OriginalCreatedAt = parentRecord.CreatedAt,
+                    LastDateUpdated = parentRecord.LastDateUpdated,
+                    DeletedAt = DateTime.UtcNow,
+                    DeletedBy = modifiedBy,
+                    DeletionReason = reason ?? "User soft-deleted parent report",
+                    ArchivedRowsJson = System.Text.Json.JsonSerializer.Serialize(parentRecord.Rows)
+                };
+
+                // 5. Create Audit Log
+                var auditLog = new AuditLogs
+                {
+                    EntityName = nameof(DailySalesDepositRecord),
+                    EntityId = parentRecord.Id,
+                    Action = "SOFT_DELETE_ARCHIVE_PARENT_REPORT",
+                    ModifiedBy = modifiedBy,
+                    Timestamp = DateTime.UtcNow,
+                    OldValues = System.Text.Json.JsonSerializer.Serialize(parentRecord),
+                    NewValues = System.Text.Json.JsonSerializer.Serialize(archivedParent),
+                    ChangedColumns = "Moved parent record to DeletedDailySalesDepositRecords and rows to DeletedDailySalesDepositRecordRows"
+                };
+
+                // 6. Execution: Remove active records & add archived records
+                _context.DeletedDailySalesDepositRecords.Add(archivedParent);
+                _context.DailySalesDepositRecordRows.RemoveRange(parentRecord.Rows);
+                _context.DailySalesDepositRecords.Remove(parentRecord);
+                _context.AuditLogs.Add(auditLog);
+
+                await _context.SaveChangesAsync();
+                await transaction.CommitAsync();
+
+                return Ok(new SuccessfulResponse { message = $"Successfully soft-deleted and archived parent report {id} along with its rows!" });
+            }
+            catch (Exception)
+            {
+                await transaction.RollbackAsync();
+                return StatusCode(500, new ErrorResponse(500, "INTERNAL_SERVER_ERROR", "An internal error occurred while executing the parent report deletion sequence."));
+            }
+        }
+
+        [HttpPost("rows/delete/{rowId:int}")]
+        [EnableRateLimiting("StrictWritePolicy")]
+        [ProducesResponseType(typeof(SuccessfulResponse), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status403Forbidden)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> DeleteRecord(int rowId, [FromQuery] string? reason)
+        {
+            using var transaction = await _context.Database.BeginTransactionAsync();
+            try
+            {
+                var userRole = User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value;
+                var branchIdClaim = User.FindFirst("BranchId")?.Value;
+                var modifiedBy = User.FindFirst(System.Security.Claims.ClaimTypes.Name)?.Value
+                              ?? User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
+                              ?? "System";
+
+                if (string.IsNullOrEmpty(branchIdClaim))
+                {
+                    return Unauthorized(new ErrorResponse(401, "UNAUTHORIZED", "Branch assignment missing from token."));
+                }
+
+                int userBranchId = int.Parse(branchIdClaim);
+                var userBranchCode = await _context.Branches
+                    .Where(r => r.Id == userBranchId)
+                    .Select(b => b.BranchCode)
+                    .FirstOrDefaultAsync();
+
+                // 1. Fetch record mula sa active table
                 var record = await _context.DailySalesDepositRecordRows
                     .Include(r => r.DailySalesDepositRecord)
                     .FirstOrDefaultAsync(r => r.Id == rowId);
 
                 if (record == null)
                 {
-                    return NotFound(new { message = "The report you are trying to delete does not exist." });
+                    return NotFound(new ErrorResponse(404, "NOT_FOUND", "The row you are trying to delete does not exist."));
                 }
 
+                // 2. Authorization Check
                 if (userRole != "Admin" && record.BranchCode != userBranchCode)
                 {
                     return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to modify records belonging to another branch."));
                 }
 
+                // 3. Map values papunta sa Replica Model (DeletedDailySalesDepositRecordRow)
+                var archivedRow = new DeletedDailySalesDepositRecordRow
+                {
+                    OriginalRowId = record.Id,
+                    DailySalesDepositRecordId = record.DailySalesDepositRecordId,
+                    BranchCode = record.BranchCode,
+                    CashierName = record.CashierName,
+                    ControlNo = record.ControlNo,
+                    DateOfTransaction = record.DateOfTransaction,
+                    TotalGrossCash = record.TotalGrossCash,
+                    CreditCardPayment = record.CreditCardPayment,
+                    SalaryAdvance = record.SalaryAdvance,
+                    Commission = record.Commission,
+                    Expenses = record.Expenses,
+                    TotalExpenses = record.TotalExpenses,
+                    AmountDeposited = record.AmountDeposited,
+                    Remarks = record.Remarks,
+                    DeletedAt = DateTime.UtcNow,
+                    DeletedBy = modifiedBy,
+                    DeletionReason = reason ?? "User requested row soft deletion"
+                };
+
+                // 4. Update parent timestamp
                 if (record.DailySalesDepositRecord != null)
                 {
                     record.DailySalesDepositRecord.LastDateUpdated = DateTime.UtcNow;
                 }
 
-                _context.DailySalesDepositRecordRows.Remove(record);
-                await _context.SaveChangesAsync();
+                // 5. Create Audit Log
+                var auditLog = new AuditLogs
+                {
+                    EntityName = nameof(DailySalesDepositRecordRow),
+                    EntityId = record.Id,
+                    Action = "SOFT_DELETE_ARCHIVE_ROW",
+                    ModifiedBy = modifiedBy,
+                    Timestamp = DateTime.UtcNow,
+                    OldValues = System.Text.Json.JsonSerializer.Serialize(record),
+                    NewValues = System.Text.Json.JsonSerializer.Serialize(archivedRow),
+                    ChangedColumns = "Moved to DeletedDailySalesDepositRecordRows"
+                };
 
-                return Ok(new SuccessfulResponse { message = $"Successfully deleted row {rowId}!" });
+                // 6. DB Execution
+                _context.DeletedDailySalesDepositRecordRows.Add(archivedRow);
+                _context.DailySalesDepositRecordRows.Remove(record);
+                _context.AuditLogs.Add(auditLog);
+
+                await _context.SaveChangesAsync();
+                await transaction.CommitAsync();
+
+                return Ok(new SuccessfulResponse { message = $"Successfully soft deleted and archived row {rowId}!" });
             }
             catch (Exception)
             {
-                return StatusCode(500, new { message = "An internal error occurred while executing the delete sequence." });
+                await transaction.RollbackAsync();
+                return StatusCode(500, new ErrorResponse(500, "INTERNAL_SERVER_ERROR", "An internal error occurred while executing the delete sequence."));
             }
         }
 
@@ -451,54 +651,89 @@ namespace JustFlip.Controllers
         [EnableRateLimiting("StrictWritePolicy")]
         [ProducesResponseType(typeof(AddSingleRowResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status403Forbidden)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
-        public async Task<IActionResult> AddSingleRowToReport(int reportId, [FromBody] AddSingleRowRequest request)
+        public async Task<IActionResult> AddSingleRowToReport(int reportId, [FromBody] AddEndDayRowRequest request)
         {
-            // 2. Kuhanin ang User Claims (Role at BranchCode/BranchId mula sa JWT Token)
-            var userRole = User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value;
-            var branchIdClaim = User.FindFirst("BranchId")?.Value;
-
-            if (string.IsNullOrEmpty(branchIdClaim))
+            try
             {
-                return Unauthorized(new ErrorResponse(401, "UNAUTHORIZED", "Branch assignment missing from authentication token."));
+                var userRole = User.FindFirst(ClaimTypes.Role)?.Value;
+                var branchIdClaim = User.FindFirst("BranchId")?.Value;
+                var modifiedBy = User.FindFirst(ClaimTypes.Name)?.Value
+                              ?? User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                              ?? "System";
+
+                if (string.IsNullOrEmpty(branchIdClaim))
+                {
+                    return Unauthorized(new ErrorResponse(401, "UNAUTHORIZED", "Branch assignment missing from token."));
+                }
+
+                int userBranchId = int.Parse(branchIdClaim);
+
+                var parentReport = await _context.EndDayReports.FindAsync(reportId);
+                if (parentReport == null)
+                {
+                    return NotFound(new ErrorResponse(404, "NOT_FOUND", $"The master report with ID {reportId} was not found."));
+                }
+
+                if (userRole != "Admin" && parentReport.BranchId != userBranchId)
+                {
+                    return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to add rows to another branch's report."));
+                }
+
+                var newRow = new EndDayReportRow
+                {
+                    BranchCode = parentReport.BranchCode,
+                    EndDayReportId = reportId,
+                    EmployeeName = request.EmployeeName,
+                    GrossAmount = request.GrossAmount,
+                    CreditCardPayment = request.CreditCardPayment,
+                    Commission = request.Commission,
+                    SalonExpenses = request.SalonExpenses,
+                    SalaryAdvance = request.SalaryAdvance
+                };
+
+                parentReport.LastDateUpdated = DateTime.UtcNow;
+
+                _context.EndDayReportRows.Add(newRow);
+                await _context.SaveChangesAsync(); // Commit muna para makuha ang generated newRow.Id
+
+                // 🛡️ Create AuditLog Record for CREATE Action
+                var auditLog = new AuditLogs
+                {
+                    EntityName = nameof(EndDayReportRow),
+                    EntityId = newRow.Id,
+                    Action = "CREATE",
+                    ModifiedBy = modifiedBy,
+                    Timestamp = DateTime.UtcNow,
+                    OldValues = null,
+                    NewValues = JsonSerializer.Serialize(new
+                    {
+                        newRow.EndDayReportId,
+                        newRow.BranchCode,
+                        newRow.EmployeeName,
+                        newRow.GrossAmount,
+                        newRow.CreditCardPayment,
+                        newRow.Commission,
+                        newRow.SalonExpenses,
+                        newRow.SalaryAdvance
+                    }),
+                    ChangedColumns = "EmployeeName, GrossAmount, CreditCardPayment, Commission, SalonExpenses, SalaryAdvance"
+                };
+
+                _context.AuditLogs.Add(auditLog);
+                await _context.SaveChangesAsync();
+
+                return Ok(new AddSingleRowResponse
+                {
+                    message = "Successfully added new row to the report!",
+                    newRowId = newRow.Id
+                });
             }
-
-            int userBranchId = int.Parse(branchIdClaim);
-
-            // 3. Hanapin ang Parent Report
-            var parentReport = await _context.DailySalesDepositRecords.FindAsync(reportId);
-            if (parentReport == null)
+            catch (Exception)
             {
-                return NotFound(new ErrorResponse(404, "NOT_FOUND", $"The master report with ID {reportId} was not found."));
+                return StatusCode(500, new ErrorResponse(500, "INTERNAL_SERVER_ERROR", "An error occurred while adding the row to the report."));
             }
-
-            // 4. 🔒 MULTI-BRANCH SECURITY CHECK
-            if (userRole != "Admin" && parentReport.BranchId != userBranchId)
-            {
-                return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to add rows to another branch's report."));
-            }
-
-            var newRow = new DailySalesDepositRecordRow
-            {
-                BranchCode = parentReport.BranchCode,
-                DailySalesDepositRecordId = reportId,
-                CashierName = request.CashierName,
-                ControlNo = request.ControlNo,
-                DateOfTransaction = request.DateOfTransaction,
-                TotalGrossCash = request.TotalGrossCash,
-                CreditCardPayment = request.CreditCardPayment,
-                SalaryAdvance = request.SalaryAdvance,
-                Commission = request.Commission,
-                Expenses = request.Expenses,
-                TotalExpenses = request.TotalExpenses,
-                AmountDeposited = request.AmountDeposited,
-                Remarks = request.Remarks
-            };
-
-            _context.DailySalesDepositRecordRows.Add(newRow);
-            await _context.SaveChangesAsync();
-
-            return Ok(new AddSingleRowResponse { message = "Sucessfully added new report!", newRowId = newRow.Id });
         }
 
         [HttpPost("download")]

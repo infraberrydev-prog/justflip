@@ -1,4 +1,5 @@
-﻿using JustFlip.Class;
+﻿using ClosedXML.Excel;
+using JustFlip.Class;
 using JustFlip.DTO;
 using JustFlip.Models;
 using Microsoft.AspNetCore.Authorization;
@@ -6,7 +7,9 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.OutputCaching;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using System.IO.Compression;
 using System.Security.Claims;
+using System.Text.Json;
 
 namespace JustFlip.Controllers
 {
@@ -16,13 +19,19 @@ namespace JustFlip.Controllers
     public class EndDayReportController : ControllerBase
     {
         private readonly JustFlipDbContext _context;
+        private readonly IOutputCacheStore _cacheStore;
         private const string ReportsCacheTag = "reports-cache-tag";
-        public EndDayReportController(JustFlipDbContext context)
+        public EndDayReportController(JustFlipDbContext context, IOutputCacheStore cacheStore)
         {
             _context = context;
+            _cacheStore = cacheStore;
+        }
+        private async Task EvictReportsCacheAsync(CancellationToken cancellationToken = default)
+        {
+            await _cacheStore.EvictByTagAsync(ReportsCacheTag, cancellationToken);
         }
 
-        [HttpPost("save")]
+        [HttpPost("save-report")]
         [EnableRateLimiting("StrictWritePolicy")]
         [ProducesResponseType(typeof(SuccessfulResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
@@ -183,152 +192,398 @@ namespace JustFlip.Controllers
             }
         }
 
-        // 1. UPDATE SINGLE ROW & TOUCH PARENT TIMESTAMP
+        // 1. UPDATE SINGLE ROW & TOUCH PARENT TIMESTAMP + AUDIT LOG
         [HttpPost("rows/update/{rowId:int}")]
         [EnableRateLimiting("StrictWritePolicy")]
         [ProducesResponseType(typeof(SuccessfulResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status403Forbidden)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status500InternalServerError)]
         public async Task<IActionResult> UpdateSingleRow(int rowId, [FromBody] UpdateEndDayReportRowDto request)
         {
-            var userRole = User.FindFirst(ClaimTypes.Role)?.Value;
-            var branchIdClaim = User.FindFirst("BranchId")?.Value;
-
-            if (string.IsNullOrEmpty(branchIdClaim))
+            using var transaction = await _context.Database.BeginTransactionAsync();
+            try
             {
-                return Unauthorized(new ErrorResponse(401, "UNAUTHORIZED", "Branch assignment missing from authentication token."));
+                var userRole = User.FindFirst(ClaimTypes.Role)?.Value;
+                var branchIdClaim = User.FindFirst("BranchId")?.Value;
+                var modifiedBy = User.FindFirst(ClaimTypes.Name)?.Value
+                              ?? User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                              ?? "System";
+
+                if (string.IsNullOrEmpty(branchIdClaim))
+                {
+                    return Unauthorized(new ErrorResponse(401, "UNAUTHORIZED", "Branch assignment missing from authentication token."));
+                }
+
+                int userBranchId = int.Parse(branchIdClaim);
+
+                var row = await _context.EndDayReportRows
+                    .Include(r => r.EndDayReport)
+                    .FirstOrDefaultAsync(r => r.Id == rowId);
+
+                if (row == null)
+                {
+                    return NotFound(new ErrorResponse(404, "NOT_FOUND", $"End day report row with ID {rowId} was not found."));
+                }
+
+                if (userRole != "Admin" && row.EndDayReport?.BranchId != userBranchId)
+                {
+                    return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to modify records from another branch."));
+                }
+
+                // 📸 1. Capture Old Values before updating
+                var oldValuesSnapshot = new
+                {
+                    row.EmployeeName,
+                    row.GrossAmount,
+                    row.CreditCardPayment,
+                    row.Commission,
+                    row.SalonExpenses,
+                    row.SalaryAdvance
+                };
+
+                // 2. Apply Updates
+                row.EmployeeName = request.EmployeeName;
+                row.GrossAmount = request.GrossAmount;
+                row.CreditCardPayment = request.CreditCardPayment;
+                row.Commission = request.Commission;
+                row.SalonExpenses = request.SalonExpenses;
+                row.SalaryAdvance = request.SalaryAdvance;
+
+                if (row.EndDayReport != null)
+                {
+                    row.EndDayReport.LastDateUpdated = DateTime.UtcNow;
+                }
+
+                // 📸 3. Capture New Values
+                var newValuesSnapshot = new
+                {
+                    request.EmployeeName,
+                    request.GrossAmount,
+                    request.CreditCardPayment,
+                    request.Commission,
+                    request.SalonExpenses,
+                    request.SalaryAdvance
+                };
+
+                // 🛡️️ 4. Create AuditLog Record
+                var auditLog = new AuditLogs
+                {
+                    EntityName = nameof(EndDayReportRow),
+                    EntityId = row.Id,
+                    Action = "UPDATE_ROW",
+                    ModifiedBy = modifiedBy,
+                    Timestamp = DateTime.UtcNow,
+                    OldValues = JsonSerializer.Serialize(oldValuesSnapshot),
+                    NewValues = JsonSerializer.Serialize(newValuesSnapshot),
+                    ChangedColumns = "EmployeeName, GrossAmount, CreditCardPayment, Commission, SalonExpenses, SalaryAdvance"
+                };
+
+                _context.AuditLogs.Add(auditLog);
+                await _context.SaveChangesAsync();
+                await transaction.CommitAsync();
+
+                return Ok(new SuccessfulResponse { message = $"Successfully updated row {rowId}!" });
             }
-
-            int userBranchId = int.Parse(branchIdClaim);
-
-            var row = await _context.EndDayReportRows
-                .Include(r => r.EndDayReport)
-                .FirstOrDefaultAsync(r => r.Id == rowId);
-
-            if (row == null)
+            catch (Exception)
             {
-                return NotFound(new ErrorResponse(404, "NOT_FOUND", $"End day report row with ID {rowId} was not found."));
+                await transaction.RollbackAsync();
+                return StatusCode(500, new ErrorResponse(500, "INTERNAL_SERVER_ERROR", "An internal error occurred while updating the report row."));
             }
-
-            if (userRole != "Admin" && row.EndDayReport?.BranchId != userBranchId)
-            {
-                return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to modify records from another branch."));
-            }
-
-            row.EmployeeName = request.EmployeeName;
-            row.GrossAmount = request.GrossAmount;
-            row.CreditCardPayment = request.CreditCardPayment;
-            row.Commission = request.Commission;
-            row.SalonExpenses = request.SalonExpenses;
-            row.SalaryAdvance = request.SalaryAdvance;
-
-            if (row.EndDayReport != null)
-            {
-                row.EndDayReport.LastDateUpdated = DateTime.UtcNow;
-            }
-
-            await _context.SaveChangesAsync();
-
-            return Ok(new SuccessfulResponse { message = $"Successfully updated row {rowId}!" });
         }
 
-        // 2. ADD SINGLE ROW TO REPORT
+
+        // 2. ADD SINGLE ROW TO REPORT + AUDIT LOG
         [HttpPost("{reportId:int}/rows/add")]
         [EnableRateLimiting("StrictWritePolicy")]
         [ProducesResponseType(typeof(AddSingleRowResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status403Forbidden)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status500InternalServerError)]
         public async Task<IActionResult> AddSingleRowToReport(int reportId, [FromBody] AddEndDayRowRequest request)
         {
-            var userRole = User.FindFirst(ClaimTypes.Role)?.Value;
-            var branchIdClaim = User.FindFirst("BranchId")?.Value;
-
-            if (string.IsNullOrEmpty(branchIdClaim))
+            using var transaction = await _context.Database.BeginTransactionAsync();
+            try
             {
-                return Unauthorized(new ErrorResponse(401, "UNAUTHORIZED", "Branch assignment missing from token."));
+                var userRole = User.FindFirst(ClaimTypes.Role)?.Value;
+                var branchIdClaim = User.FindFirst("BranchId")?.Value;
+                var modifiedBy = User.FindFirst(ClaimTypes.Name)?.Value
+                              ?? User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                              ?? "System";
+
+                if (string.IsNullOrEmpty(branchIdClaim))
+                {
+                    return Unauthorized(new ErrorResponse(401, "UNAUTHORIZED", "Branch assignment missing from token."));
+                }
+
+                int userBranchId = int.Parse(branchIdClaim);
+
+                var parentReport = await _context.EndDayReports.FindAsync(reportId);
+                if (parentReport == null)
+                {
+                    return NotFound(new ErrorResponse(404, "NOT_FOUND", $"The master report with ID {reportId} was not found."));
+                }
+
+                if (userRole != "Admin" && parentReport.BranchId != userBranchId)
+                {
+                    return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to add rows to another branch's report."));
+                }
+
+                // 1. Instantiate New Row
+                var newRow = new EndDayReportRow
+                {
+                    BranchCode = parentReport.BranchCode,
+                    EndDayReportId = reportId,
+                    EmployeeName = request.EmployeeName,
+                    GrossAmount = request.GrossAmount,
+                    CreditCardPayment = request.CreditCardPayment,
+                    Commission = request.Commission,
+                    SalonExpenses = request.SalonExpenses,
+                    SalaryAdvance = request.SalaryAdvance
+                };
+
+                parentReport.LastDateUpdated = DateTime.UtcNow;
+
+                _context.EndDayReportRows.Add(newRow);
+                await _context.SaveChangesAsync(); // Para ma-generate ang newRow.Id
+
+                // 🛡️ 2. Create AuditLog Record for ADD_ROW
+                var auditLog = new AuditLogs
+                {
+                    EntityName = nameof(EndDayReportRow),
+                    EntityId = newRow.Id,
+                    Action = "ADD_ROW",
+                    ModifiedBy = modifiedBy,
+                    Timestamp = DateTime.UtcNow,
+                    OldValues = null, // Walang old values dahil bagong nilikha
+                    NewValues = JsonSerializer.Serialize(newRow),
+                    ChangedColumns = "All Columns"
+                };
+
+                _context.AuditLogs.Add(auditLog);
+                await _context.SaveChangesAsync();
+
+                await transaction.CommitAsync();
+
+                return Ok(new AddSingleRowResponse
+                {
+                    message = "Successfully added new row to the report!",
+                    newRowId = newRow.Id
+                });
             }
-
-            int userBranchId = int.Parse(branchIdClaim);
-
-            var parentReport = await _context.EndDayReports.FindAsync(reportId);
-            if (parentReport == null)
+            catch (Exception)
             {
-                return NotFound(new ErrorResponse(404, "NOT_FOUND", $"The master report with ID {reportId} was not found."));
+                await transaction.RollbackAsync();
+                return StatusCode(500, new ErrorResponse(500, "INTERNAL_SERVER_ERROR", "An internal error occurred while adding the row to the report."));
             }
-
-            if (userRole != "Admin" && parentReport.BranchId != userBranchId)
-            {
-                return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to add rows to another branch's report."));
-            }
-
-            var newRow = new EndDayReportRow
-            {
-                BranchCode = parentReport.BranchCode,
-                EndDayReportId = reportId,
-                EmployeeName = request.EmployeeName,
-                GrossAmount = request.GrossAmount,
-                CreditCardPayment = request.CreditCardPayment,
-                Commission = request.Commission,
-                SalonExpenses = request.SalonExpenses,
-                SalaryAdvance = request.SalaryAdvance
-            };
-
-            parentReport.LastDateUpdated = DateTime.UtcNow;
-
-            _context.EndDayReportRows.Add(newRow);
-            await _context.SaveChangesAsync();
-
-            return Ok(new AddSingleRowResponse
-            {
-                message = "Successfully added new row to the report!",
-                newRowId = newRow.Id
-            });
         }
 
         // 3. DELETE SINGLE ROW
-        [HttpDelete("rows/{rowId:int}")]
+        [HttpPost("rows/delete/{rowId:int}")]
         [EnableRateLimiting("StrictWritePolicy")]
         [ProducesResponseType(typeof(SuccessfulResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status403Forbidden)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
-        public async Task<IActionResult> DeleteRow(int rowId)
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> SoftDeleteRow(int rowId, [FromQuery] string? reason)
         {
-            var userRole = User.FindFirst(ClaimTypes.Role)?.Value;
-            var branchIdClaim = User.FindFirst("BranchId")?.Value;
-
-            if (string.IsNullOrEmpty(branchIdClaim))
+            using var transaction = await _context.Database.BeginTransactionAsync();
+            try
             {
-                return Unauthorized(new ErrorResponse(401, "UNAUTHORIZED", "Branch assignment missing from token."));
+                var userRole = User.FindFirst(ClaimTypes.Role)?.Value;
+                var branchIdClaim = User.FindFirst("BranchId")?.Value;
+                var modifiedBy = User.FindFirst(ClaimTypes.Name)?.Value
+                              ?? User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                              ?? "System";
+
+                if (string.IsNullOrEmpty(branchIdClaim))
+                {
+                    return Unauthorized(new ErrorResponse(401, "UNAUTHORIZED", "Branch assignment missing from authentication token."));
+                }
+
+                int userBranchId = int.Parse(branchIdClaim);
+
+                // 1. Query the active row record
+                var row = await _context.EndDayReportRows
+                    .Include(r => r.EndDayReport)
+                    .FirstOrDefaultAsync(r => r.Id == rowId);
+
+                if (row == null)
+                {
+                    return NotFound(new ErrorResponse(404, "NOT_FOUND", $"End day report row with ID {rowId} was not found in active records."));
+                }
+
+                // 2. Authorization Check
+                if (userRole != "Admin" && row.EndDayReport?.BranchId != userBranchId)
+                {
+                    return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to delete records belonging to another branch."));
+                }
+
+                // 3. Map to Archive Replica Entity
+                var archivedRow = new DeletedEndDayReportRow
+                {
+                    OriginalRowId = row.Id,
+                    EndDayReportId = row.EndDayReportId,
+                    BranchCode = row.BranchCode,
+                    EmployeeName = row.EmployeeName,
+                    GrossAmount = row.GrossAmount,
+                    CreditCardPayment = row.CreditCardPayment,
+                    Commission = row.Commission,
+                    SalonExpenses = row.SalonExpenses,
+                    SalaryAdvance = row.SalaryAdvance,
+                    DeletedAt = DateTime.UtcNow,
+                    DeletedBy = modifiedBy,
+                    DeletionReason = reason ?? "User soft-deleted row"
+                };
+
+                // 4. Touch Parent Update Timestamp
+                if (row.EndDayReport != null)
+                {
+                    row.EndDayReport.LastDateUpdated = DateTime.UtcNow;
+                }
+
+                // 5. Create Audit Log
+                var auditLog = new AuditLogs
+                {
+                    EntityName = nameof(EndDayReportRow),
+                    EntityId = row.Id,
+                    Action = "SOFT_DELETE_ARCHIVE_ROW",
+                    ModifiedBy = modifiedBy,
+                    Timestamp = DateTime.UtcNow,
+                    OldValues = JsonSerializer.Serialize(row),
+                    NewValues = JsonSerializer.Serialize(archivedRow),
+                    ChangedColumns = "Moved to DeletedEndDayReportRows"
+                };
+
+                // 6. DB Execution
+                _context.DeletedEndDayReportRows.Add(archivedRow);
+                _context.EndDayReportRows.Remove(row);
+                _context.AuditLogs.Add(auditLog);
+
+                await _context.SaveChangesAsync();
+                await transaction.CommitAsync();
+
+                return Ok(new SuccessfulResponse { message = $"Row {rowId} successfully soft deleted and archived." });
             }
-
-            int userBranchId = int.Parse(branchIdClaim);
-
-            var row = await _context.EndDayReportRows
-                .Include(r => r.EndDayReport)
-                .FirstOrDefaultAsync(r => r.Id == rowId);
-
-            if (row == null)
+            catch (Exception)
             {
-                return NotFound(new ErrorResponse(404, "NOT_FOUND", $"Row with ID {rowId} was not found."));
+                await transaction.RollbackAsync();
+                return StatusCode(500, new ErrorResponse(500, "INTERNAL_SERVER_ERROR", "An internal error occurred while executing the row deletion sequence."));
             }
+        }
 
-            if (userRole != "Admin" && row.EndDayReport?.BranchId != userBranchId)
+        [HttpPost("delete/{id:int}")]
+        [EnableRateLimiting("StrictWritePolicy")]
+        [ProducesResponseType(typeof(SuccessfulResponse), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status403Forbidden)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> SoftDeleteMasterReport(int id, [FromQuery] string? reason)
+        {
+            using var transaction = await _context.Database.BeginTransactionAsync();
+            try
             {
-                return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to delete rows from another branch's report."));
-            }
+                var userRole = User.FindFirst(ClaimTypes.Role)?.Value;
+                var branchIdClaim = User.FindFirst("BranchId")?.Value;
+                var modifiedBy = User.FindFirst(ClaimTypes.Name)?.Value
+                              ?? User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                              ?? "System";
 
-            if (row.EndDayReport != null)
+                if (string.IsNullOrEmpty(branchIdClaim))
+                {
+                    return Unauthorized(new ErrorResponse(401, "UNAUTHORIZED", "Branch assignment missing from token."));
+                }
+
+                int userBranchId = int.Parse(branchIdClaim);
+
+                // 1. Fetch parent report kasama ang lahat ng active child rows
+                var report = await _context.EndDayReports
+                    .Include(r => r.Rows)
+                    .FirstOrDefaultAsync(r => r.Id == id);
+
+                if (report == null)
+                {
+                    return NotFound(new ErrorResponse(404, "NOT_FOUND", $"End day report with ID {id} was not found in active records."));
+                }
+
+                // 2. Authorization Check
+                if (userRole != "Admin" && report.BranchId != userBranchId)
+                {
+                    return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to delete reports belonging to another branch."));
+                }
+
+                // 3. Move all child rows to DeletedEndDayReportRows
+                foreach (var childRow in report.Rows)
+                {
+                    var archivedChild = new DeletedEndDayReportRow
+                    {
+                        OriginalRowId = childRow.Id,
+                        EndDayReportId = childRow.EndDayReportId,
+                        BranchCode = childRow.BranchCode,
+                        EmployeeName = childRow.EmployeeName,
+                        GrossAmount = childRow.GrossAmount,
+                        CreditCardPayment = childRow.CreditCardPayment,
+                        Commission = childRow.Commission,
+                        SalonExpenses = childRow.SalonExpenses,
+                        SalaryAdvance = childRow.SalaryAdvance,
+                        DeletedAt = DateTime.UtcNow,
+                        DeletedBy = modifiedBy,
+                        DeletionReason = reason ?? "Parent master report deleted"
+                    };
+
+                    _context.DeletedEndDayReportRows.Add(archivedChild);
+                }
+
+                // 4. Map parent values to Replica Model
+                var archivedReport = new DeletedEndDayReport
+                {
+                    OriginalReportId = report.Id,
+                    BranchId = report.BranchId,
+                    BranchCode = report.BranchCode,
+                    ReportName = report.ReportName,
+                    DateOfReport = report.DateOfReport,
+                    CashierName = report.CashierName,
+                    OriginalCreatedAt = report.CreatedAt,
+                    LastDateUpdated = report.LastDateUpdated,
+                    DeletedAt = DateTime.UtcNow,
+                    DeletedBy = modifiedBy,
+                    DeletionReason = reason ?? "User soft-deleted master report",
+                    ArchivedRowsJson = JsonSerializer.Serialize(report.Rows)
+                };
+
+                // 5. Create Audit Log
+                var auditLog = new AuditLogs
+                {
+                    EntityName = nameof(EndDayReport),
+                    EntityId = report.Id,
+                    Action = "SOFT_DELETE_ARCHIVE_MASTER_REPORT",
+                    ModifiedBy = modifiedBy,
+                    Timestamp = DateTime.UtcNow,
+                    OldValues = JsonSerializer.Serialize(report),
+                    NewValues = JsonSerializer.Serialize(archivedReport),
+                    ChangedColumns = "Moved parent report to DeletedEndDayReports and child rows to DeletedEndDayReportRows"
+                };
+
+                // 6. DB Execution: Remove active records & add archived replicas
+                _context.DeletedEndDayReports.Add(archivedReport);
+                _context.EndDayReportRows.RemoveRange(report.Rows);
+                _context.EndDayReports.Remove(report);
+                _context.AuditLogs.Add(auditLog);
+
+                await _context.SaveChangesAsync();
+                await transaction.CommitAsync();
+
+                return Ok(new SuccessfulResponse { message = $"Master report {id} and its rows were successfully soft-deleted and archived." });
+            }
+            catch (Exception)
             {
-                row.EndDayReport.LastDateUpdated = DateTime.UtcNow;
+                await transaction.RollbackAsync();
+                return StatusCode(500, new ErrorResponse(500, "INTERNAL_SERVER_ERROR", "An error occurred while executing the master report deletion sequence."));
             }
-
-            _context.EndDayReportRows.Remove(row);
-            await _context.SaveChangesAsync();
-
-            return Ok(new SuccessfulResponse { message = $"Successfully deleted row {rowId}!" });
         }
 
         [HttpGet("get-all-reports")]
@@ -574,6 +829,226 @@ namespace JustFlip.Controllers
             {
                 return StatusCode(500, new ErrorResponse(500, "INTERNAL_SERVER_ERROR", "An error occurred while retrieving end day report details."));
             }
+        }
+
+        // ==========================================
+        // DOWNLOAD ENDPOINT (SINGLE EXCEL OR ZIP)
+        // ==========================================
+        [HttpPost("download")]
+        [EnableRateLimiting("DownloadPolicy")]
+        [ProducesResponseType(StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status403Forbidden)]
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> DownloadEndDayReports([FromBody] DownloadReportsRequest request)
+        {
+            if (request?.ReportIds == null || !request.ReportIds.Any())
+            {
+                return BadRequest(new ErrorResponse(400, "INVALID_REQUEST", "Please select at least one report to download."));
+            }
+
+            var userRole = User.FindFirst(ClaimTypes.Role)?.Value;
+            var branchIdClaim = User.FindFirst("BranchId")?.Value;
+
+            if (string.IsNullOrEmpty(branchIdClaim))
+            {
+                return Unauthorized(new ErrorResponse(401, "UNAUTHORIZED", "Branch assignment missing from token."));
+            }
+
+            int userBranchId = int.Parse(branchIdClaim);
+
+            // 1. Fetch requested reports with their child rows
+            var reports = await _context.EndDayReports
+                .Include(r => r.Rows)
+                .Where(r => request.ReportIds.Contains(r.Id))
+                .ToListAsync();
+
+            if (!reports.Any())
+            {
+                return NotFound(new ErrorResponse(404, "NOT_FOUND", "No matching end day reports found for the selected IDs."));
+            }
+
+            // 2. Branch Authorization Filter
+            if (userRole != "Admin")
+            {
+                var unauthorizedReports = reports.Where(r => r.BranchId != userBranchId).ToList();
+                if (unauthorizedReports.Any())
+                {
+                    return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to download reports from another branch."));
+                }
+            }
+
+            // ==========================================
+            // CASE A: SINGLE REPORT SELECTED (.xlsx)
+            // ==========================================
+            if (reports.Count == 1)
+            {
+                var report = reports.First();
+                var fileBytes = GenerateEndDayReportExcelBytes(report);
+                string fileName = $"{SanitizeFileName(report.ReportName)}.xlsx";
+
+                return File(fileBytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fileName);
+            }
+
+            // ==========================================
+            // CASE B: MULTIPLE REPORTS SELECTED (.zip)
+            // ==========================================
+            using (var zipStream = new MemoryStream())
+            {
+                using (var archive = new ZipArchive(zipStream, ZipArchiveMode.Create, true))
+                {
+                    foreach (var report in reports)
+                    {
+                        var fileBytes = GenerateEndDayReportExcelBytes(report);
+                        var entryName = $"{SanitizeFileName(report.ReportName)}_{report.Id}.xlsx";
+
+                        var entry = archive.CreateEntry(entryName, CompressionLevel.Fastest);
+                        using (var entryStream = entry.Open())
+                        {
+                            await entryStream.WriteAsync(fileBytes, 0, fileBytes.Length);
+                        }
+                    }
+                }
+
+                zipStream.Position = 0;
+                string zipFileName = $"EndDay_Reports_{DateTime.UtcNow:yyyyMMdd_HHmmss}.zip";
+
+                return File(zipStream.ToArray(), "application/zip", zipFileName);
+            }
+        }
+
+        // ==========================================
+        // HELPER METHODS FOR EXCEL GENERATION
+        // ==========================================
+        private byte[] GenerateEndDayReportExcelBytes(EndDayReport report)
+        {
+            using (var workbook = new XLWorkbook())
+            {
+                var worksheet = workbook.Worksheets.Add("End Day Report");
+
+                // 1. Report Title & Sub-header (Base sa UI Screenshot)
+                worksheet.Cell(1, 1).Value = report.ReportName; // e.g., "Payment report for the month of March 2026"
+                worksheet.Cell(1, 1).Style.Font.Bold = true;
+                worksheet.Cell(1, 1).Style.Font.FontSize = 16;
+
+                worksheet.Cell(2, 1).Value = report.CreatedAt.ToString("MMM d, yyyy - HH:mm:ss");
+                worksheet.Cell(2, 1).Style.Font.FontColor = XLColor.Gray;
+
+                // 2. Exact Column Headers mula sa UI
+                string[] headers = new string[]
+                {
+                    "Cashier Name",
+                    "Date of Transaction",
+                    "Total Gross (Cash)",
+                    "Credit Card Payment",
+                    "Total Amount Deposited",
+                    "Salary Advance",
+                    "Commission",
+                    "Expenses",
+                    "Total Expenses",
+                    "Remarks",
+                    "Total Amount"
+                };
+
+                int headerRowIndex = 4;
+                for (int col = 0; col < headers.Length; col++)
+                {
+                    var cell = worksheet.Cell(headerRowIndex, col + 1);
+                    cell.Value = headers[col];
+                    cell.Style.Font.Bold = true;
+                    cell.Style.Fill.BackgroundColor = XLColor.FromHtml("#F9FAFB");
+                    cell.Style.Font.FontColor = XLColor.FromHtml("#4B5563");
+                    cell.Style.Border.OutsideBorder = XLBorderStyleValues.Thin;
+                    cell.Style.Border.OutsideBorderColor = XLColor.FromHtml("#E5E7EB");
+                }
+
+                // 3. Populate EndDayReportRow Data
+                int currentRow = 5;
+                foreach (var row in report.Rows)
+                {
+                    // Employee Name / Cashier
+                    worksheet.Cell(currentRow, 1).Value = string.IsNullOrWhiteSpace(row.EmployeeName) ? report.CashierName : row.EmployeeName;
+
+                    // Date of Transaction (gamit ang DateOfReport ng parent report)
+                    worksheet.Cell(currentRow, 2).Value = report.DateOfReport.ToString("MMM d, yyyy");
+
+                    // Total Gross (Cash) -> GrossAmount
+                    worksheet.Cell(currentRow, 3).Value = row.GrossAmount;
+                    worksheet.Cell(currentRow, 3).Style.NumberFormat.Format = "₱#,##0.00";
+
+                    // Credit Card Payment
+                    worksheet.Cell(currentRow, 4).Value = row.CreditCardPayment.HasValue && row.CreditCardPayment.Value > 0 ? row.CreditCardPayment.Value : "—";
+                    if (row.CreditCardPayment.HasValue && row.CreditCardPayment.Value > 0)
+                        worksheet.Cell(currentRow, 4).Style.NumberFormat.Format = "₱#,##0.00";
+
+                    // Total Amount Deposited (Calculated cash deposited value)
+                    decimal amountDeposited = row.GrossAmount - (row.CreditCardPayment ?? 0);
+                    worksheet.Cell(currentRow, 5).Value = amountDeposited;
+                    worksheet.Cell(currentRow, 5).Style.NumberFormat.Format = "₱#,##0.00";
+
+                    // Salary Advance
+                    worksheet.Cell(currentRow, 6).Value = row.SalaryAdvance.HasValue && row.SalaryAdvance.Value > 0 ? row.SalaryAdvance.Value : "—";
+                    if (row.SalaryAdvance.HasValue && row.SalaryAdvance.Value > 0)
+                        worksheet.Cell(currentRow, 6).Style.NumberFormat.Format = "₱#,##0.00";
+
+                    // Commission
+                    worksheet.Cell(currentRow, 7).Value = row.Commission > 0 ? row.Commission : "—";
+                    if (row.Commission > 0)
+                        worksheet.Cell(currentRow, 7).Style.NumberFormat.Format = "₱#,##0.00";
+
+                    // Expenses / SalonExpenses
+                    worksheet.Cell(currentRow, 8).Value = row.SalonExpenses.HasValue && row.SalonExpenses.Value > 0 ? row.SalonExpenses.Value : "—";
+                    if (row.SalonExpenses.HasValue && row.SalonExpenses.Value > 0)
+                        worksheet.Cell(currentRow, 8).Style.NumberFormat.Format = "₱#,##0.00";
+
+                    // Total Expenses
+                    decimal totalExpenses = (row.SalonExpenses ?? 0) + (row.SalaryAdvance ?? 0);
+                    worksheet.Cell(currentRow, 9).Value = totalExpenses > 0 ? totalExpenses : "—";
+                    if (totalExpenses > 0)
+                        worksheet.Cell(currentRow, 9).Style.NumberFormat.Format = "₱#,##0.00";
+
+                    // Remarks
+                    worksheet.Cell(currentRow, 10).Value = "—";
+
+                    // Total Amount (Net Take)
+                    decimal totalAmount = row.GrossAmount
+                                        - (row.CreditCardPayment ?? 0)
+                                        - row.Commission
+                                        - (row.SalonExpenses ?? 0)
+                                        - (row.SalaryAdvance ?? 0);
+
+                    worksheet.Cell(currentRow, 11).Value = totalAmount;
+                    worksheet.Cell(currentRow, 11).Style.NumberFormat.Format = "₱#,##0.00";
+
+                    // Row Borders Styling
+                    for (int col = 1; col <= headers.Length; col++)
+                    {
+                        worksheet.Cell(currentRow, col).Style.Border.OutsideBorder = XLBorderStyleValues.Thin;
+                        worksheet.Cell(currentRow, col).Style.Border.OutsideBorderColor = XLColor.FromHtml("#F3F4F6");
+                    }
+
+                    currentRow++;
+                }
+
+                // 4. Auto-fit columns to content length
+                worksheet.Columns().AdjustToContents();
+
+                using (var stream = new MemoryStream())
+                {
+                    workbook.SaveAs(stream);
+                    return stream.ToArray();
+                }
+            }
+        }
+
+        private string SanitizeFileName(string fileName)
+        {
+            foreach (char c in Path.GetInvalidFileNameChars())
+            {
+                fileName = fileName.Replace(c, '_');
+            }
+            return fileName;
         }
     }
 }

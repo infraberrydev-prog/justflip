@@ -20,6 +20,11 @@ public class JustFlipDbContext : DbContext
     public DbSet<DailySalesDepositRecordRow> DailySalesDepositRecordRows => Set<DailySalesDepositRecordRow>();
     public DbSet<EndDayReport> EndDayReports => Set<EndDayReport>();
     public DbSet<EndDayReportRow> EndDayReportRows => Set<EndDayReportRow>();
+    public DbSet<DeletedDailySalesDepositRecordRow> DeletedDailySalesDepositRecordRows { get; set; }
+    public DbSet<DeletedDailySalesDepositRecord> DeletedDailySalesDepositRecords { get; set; }
+    public DbSet<DeletedEndDayReportRow> DeletedEndDayReportRows { get; set; }
+    public DbSet<DeletedEndDayReport> DeletedEndDayReports { get; set; }
+    public DbSet<AuditLogs> AuditLogs { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
