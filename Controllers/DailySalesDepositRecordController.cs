@@ -455,7 +455,7 @@ namespace JustFlip.Controllers
                     .Select(b => b.BranchCode)
                     .FirstOrDefaultAsync();
 
-                // 1. Fetch parent record kasama ang lahat ng active child rows
+                // 1. Fetch parent record kasama ang active rows
                 var parentRecord = await _context.DailySalesDepositRecords
                     .Include(p => p.Rows)
                     .FirstOrDefaultAsync(p => p.Id == id);
@@ -470,6 +470,12 @@ namespace JustFlip.Controllers
                 {
                     return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to delete reports belonging to another branch."));
                 }
+
+                // Options para i-ignore ang circular references
+                var jsonSerializerOptions = new System.Text.Json.JsonSerializerOptions
+                {
+                    ReferenceHandler = System.Text.Json.Serialization.ReferenceHandler.IgnoreCycles
+                };
 
                 // 3. Move all child rows to DeletedDailySalesDepositRecordRows
                 foreach (var childRow in parentRecord.Rows)
@@ -510,7 +516,7 @@ namespace JustFlip.Controllers
                     DeletedAt = DateTime.UtcNow,
                     DeletedBy = modifiedBy,
                     DeletionReason = reason ?? "User soft-deleted parent report",
-                    ArchivedRowsJson = System.Text.Json.JsonSerializer.Serialize(parentRecord.Rows)
+                    ArchivedRowsJson = System.Text.Json.JsonSerializer.Serialize(parentRecord.Rows, jsonSerializerOptions)
                 };
 
                 // 5. Create Audit Log
@@ -521,12 +527,12 @@ namespace JustFlip.Controllers
                     Action = "SOFT_DELETE_ARCHIVE_PARENT_REPORT",
                     ModifiedBy = modifiedBy,
                     Timestamp = DateTime.UtcNow,
-                    OldValues = System.Text.Json.JsonSerializer.Serialize(parentRecord),
-                    NewValues = System.Text.Json.JsonSerializer.Serialize(archivedParent),
+                    OldValues = System.Text.Json.JsonSerializer.Serialize(parentRecord, jsonSerializerOptions),
+                    NewValues = System.Text.Json.JsonSerializer.Serialize(archivedParent, jsonSerializerOptions),
                     ChangedColumns = "Moved parent record to DeletedDailySalesDepositRecords and rows to DeletedDailySalesDepositRecordRows"
                 };
 
-                // 6. Execution: Remove active records & add archived records
+                // 6. DB Operations
                 _context.DeletedDailySalesDepositRecords.Add(archivedParent);
                 _context.DailySalesDepositRecordRows.RemoveRange(parentRecord.Rows);
                 _context.DailySalesDepositRecords.Remove(parentRecord);

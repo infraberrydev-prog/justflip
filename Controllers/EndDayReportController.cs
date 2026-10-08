@@ -10,6 +10,7 @@ using Microsoft.EntityFrameworkCore;
 using System.IO.Compression;
 using System.Security.Claims;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace JustFlip.Controllers
 {
@@ -516,6 +517,12 @@ namespace JustFlip.Controllers
                     return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to delete reports belonging to another branch."));
                 }
 
+                // 🛡️ JSON Serializer Options para i-ignore ang circular navigation properties
+                var jsonOptions = new JsonSerializerOptions
+                {
+                    ReferenceHandler = ReferenceHandler.IgnoreCycles
+                };
+
                 // 3. Move all child rows to DeletedEndDayReportRows
                 foreach (var childRow in report.Rows)
                 {
@@ -552,7 +559,7 @@ namespace JustFlip.Controllers
                     DeletedAt = DateTime.UtcNow,
                     DeletedBy = modifiedBy,
                     DeletionReason = reason ?? "User soft-deleted master report",
-                    ArchivedRowsJson = JsonSerializer.Serialize(report.Rows)
+                    ArchivedRowsJson = JsonSerializer.Serialize(report.Rows, jsonOptions)
                 };
 
                 // 5. Create Audit Log
@@ -563,8 +570,8 @@ namespace JustFlip.Controllers
                     Action = "SOFT_DELETE_ARCHIVE_MASTER_REPORT",
                     ModifiedBy = modifiedBy,
                     Timestamp = DateTime.UtcNow,
-                    OldValues = JsonSerializer.Serialize(report),
-                    NewValues = JsonSerializer.Serialize(archivedReport),
+                    OldValues = JsonSerializer.Serialize(report, jsonOptions),
+                    NewValues = JsonSerializer.Serialize(archivedReport, jsonOptions),
                     ChangedColumns = "Moved parent report to DeletedEndDayReports and child rows to DeletedEndDayReportRows"
                 };
 
