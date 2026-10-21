@@ -684,8 +684,10 @@ namespace JustFlip.Controllers
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status403Forbidden)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
-        public async Task<IActionResult> AddSingleRowToReport(int reportId, [FromBody] AddEndDayRowRequest request)
+        [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> AddSingleRowToReport(int reportId, [FromBody] AddSingleRowRequest request)
         {
+            using var transaction = await _context.Database.BeginTransactionAsync();
             try
             {
                 var userRole = User.FindFirst(ClaimTypes.Role)?.Value;
@@ -699,12 +701,16 @@ namespace JustFlip.Controllers
                     return Unauthorized(new ErrorResponse(401, "UNAUTHORIZED", "Branch assignment missing from token."));
                 }
 
-                int userBranchId = int.Parse(branchIdClaim);
+                if (!int.TryParse(branchIdClaim, out int userBranchId))
+                {
+                    return Unauthorized(new ErrorResponse(401, "UNAUTHORIZED", "Invalid branch claim."));
+                }
 
-                var parentReport = await _context.EndDayReports.FindAsync(reportId);
+                var parentReport = await _context.DailySalesDepositRecords
+                    .FirstOrDefaultAsync(r => r.Id == reportId);
                 if (parentReport == null)
                 {
-                    return NotFound(new ErrorResponse(404, "NOT_FOUND", $"The master report with ID {reportId} was not found."));
+                    return NotFound(new ErrorResponse(404, "NOT_FOUND", $"The daily sales deposit report with ID {reportId} was not found."));
                 }
 
                 if (userRole != "Admin" && parentReport.BranchId != userBranchId)
@@ -712,48 +718,58 @@ namespace JustFlip.Controllers
                     return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to add rows to another branch's report."));
                 }
 
-                var newRow = new EndDayReportRow
+                var newRow = new DailySalesDepositRecordRow
                 {
                     BranchCode = parentReport.BranchCode,
-                    EndDayReportId = reportId,
-                    EmployeeName = request.EmployeeName,
-                    GrossAmount = request.GrossAmount,
+                    DailySalesDepositRecordId = reportId,
+                    CashierName = request.CashierName,
+                    ControlNo = request.ControlNo,
+                    DateOfTransaction = request.DateOfTransaction,
+                    TotalGrossCash = request.TotalGrossCash,
                     CreditCardPayment = request.CreditCardPayment,
+                    SalaryAdvance = request.SalaryAdvance,
                     Commission = request.Commission,
-                    SalonExpenses = request.SalonExpenses,
-                    SalaryAdvance = request.SalaryAdvance
+                    Expenses = request.Expenses,
+                    TotalExpenses = request.TotalExpenses,
+                    AmountDeposited = request.AmountDeposited,
+                    Remarks = request.Remarks
                 };
 
                 parentReport.LastDateUpdated = DateTime.UtcNow;
 
-                _context.EndDayReportRows.Add(newRow);
-                await _context.SaveChangesAsync(); // Commit muna para makuha ang generated newRow.Id
+                _context.DailySalesDepositRecordRows.Add(newRow);
+                await _context.SaveChangesAsync();
 
-                // 🛡️ Create AuditLog Record for CREATE Action
                 var auditLog = new AuditLogs
                 {
-                    EntityName = nameof(EndDayReportRow),
+                    EntityName = nameof(DailySalesDepositRecordRow),
                     EntityId = newRow.Id,
-                    Action = "CREATE",
+                    Action = "ADD_ROW",
                     ModifiedBy = modifiedBy,
                     Timestamp = DateTime.UtcNow,
                     OldValues = null,
                     NewValues = JsonSerializer.Serialize(new
                     {
-                        newRow.EndDayReportId,
+                        newRow.DailySalesDepositRecordId,
                         newRow.BranchCode,
-                        newRow.EmployeeName,
-                        newRow.GrossAmount,
+                        newRow.CashierName,
+                        newRow.ControlNo,
+                        newRow.DateOfTransaction,
+                        newRow.TotalGrossCash,
                         newRow.CreditCardPayment,
+                        newRow.SalaryAdvance,
                         newRow.Commission,
-                        newRow.SalonExpenses,
-                        newRow.SalaryAdvance
+                        newRow.Expenses,
+                        newRow.TotalExpenses,
+                        newRow.AmountDeposited,
+                        newRow.Remarks
                     }),
-                    ChangedColumns = "EmployeeName, GrossAmount, CreditCardPayment, Commission, SalonExpenses, SalaryAdvance"
+                    ChangedColumns = "CashierName, ControlNo, DateOfTransaction, TotalGrossCash, CreditCardPayment, SalaryAdvance, Commission, Expenses, TotalExpenses, AmountDeposited, Remarks"
                 };
 
                 _context.AuditLogs.Add(auditLog);
                 await _context.SaveChangesAsync();
+                await transaction.CommitAsync();
 
                 return Ok(new AddSingleRowResponse
                 {
@@ -761,8 +777,10 @@ namespace JustFlip.Controllers
                     newRowId = newRow.Id
                 });
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                await transaction.RollbackAsync();
+                _logger.LogError(ex, "Failed to add row {RowId} to daily sales deposit report {ReportId}.", request?.ControlNo, reportId);
                 return StatusCode(500, new ErrorResponse(500, "INTERNAL_SERVER_ERROR", "An error occurred while adding the row to the report."));
             }
         }
