@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.OutputCaching;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using static JustFlip.DTO.LoginDto;
@@ -21,14 +22,16 @@ namespace JustFlip.Controllers
         private readonly GenerateTokenJwt _generateToken;
         private readonly SendEmailOtp _sendOTP;
         private readonly IOutputCacheStore _cacheStore;
+        private readonly ILogger<AuthController> _logger;
 
-        public AuthController(JustFlipDbContext context, IConfiguration configuration, IOutputCacheStore cacheStore)
+        public AuthController(JustFlipDbContext context, IConfiguration configuration, IOutputCacheStore cacheStore, ILogger<AuthController> logger)
         {
             _context = context;
             _configuration = configuration;
             _sendOTP = new SendEmailOtp(configuration);
             _generateToken = new GenerateTokenJwt(context, configuration);
             _cacheStore = cacheStore;
+            _logger = logger;
         }
 
         [HttpPost("login")]
@@ -66,7 +69,7 @@ namespace JustFlip.Controllers
                 {
                     UserId = user.Id,
                     OtpCode = generatedOtp,
-                    ExpiryTime = DateTime.Now.AddMinutes(5),
+                    ExpiryTime = DateTime.UtcNow.AddMinutes(5),
                     IsUsed = false
                 };
 
@@ -148,7 +151,7 @@ namespace JustFlip.Controllers
                 ));
             }
 
-            var currentUtcTime = DateTime.Now;
+            var currentUtcTime = DateTime.UtcNow;
 
             var latestOtp = await _context.UserOtps
                 .Where(o => o.UserId == request.UserId && !o.IsUsed && o.ExpiryTime >= currentUtcTime)
@@ -222,13 +225,13 @@ namespace JustFlip.Controllers
 
             string generatedOtp = RandomNumberGenerator.GetInt32(100000, 1000000).ToString();
 
-            var newOtp = new UserOTP
-            {
-                UserId = user.Id,
-                OtpCode = generatedOtp,
-                ExpiryTime = DateTime.UtcNow.AddMinutes(5),
-                IsUsed = false
-            };
+                var newOtp = new UserOTP
+                {
+                    UserId = user.Id,
+                    OtpCode = generatedOtp,
+                    ExpiryTime = DateTime.UtcNow.AddMinutes(5),
+                    IsUsed = false
+                };
 
             _context.UserOtps.Add(newOtp);
             await _context.SaveChangesAsync();

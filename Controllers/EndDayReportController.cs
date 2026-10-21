@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.OutputCaching;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using System.IO.Compression;
 using System.Security.Claims;
 using System.Text.Json;
@@ -21,11 +22,13 @@ namespace JustFlip.Controllers
     {
         private readonly JustFlipDbContext _context;
         private readonly IOutputCacheStore _cacheStore;
+        private readonly ILogger<EndDayReportController> _logger;
         private const string ReportsCacheTag = "reports-cache-tag";
-        public EndDayReportController(JustFlipDbContext context, IOutputCacheStore cacheStore)
+        public EndDayReportController(JustFlipDbContext context, IOutputCacheStore cacheStore, ILogger<EndDayReportController> logger)
         {
             _context = context;
             _cacheStore = cacheStore;
+            _logger = logger;
         }
         private async Task EvictReportsCacheAsync(CancellationToken cancellationToken = default)
         {
@@ -63,7 +66,10 @@ namespace JustFlip.Controllers
                     return Unauthorized(new ErrorResponse(401, "UNAUTHORIZED", "Branch assignment missing from token."));
                 }
 
-                int userBranchId = int.Parse(branchIdClaim);
+                if (!int.TryParse(branchIdClaim, out int userBranchId))
+                {
+                    return Unauthorized(new ErrorResponse(401, "UNAUTHORIZED", "Invalid branch claim."));
+                }
 
                 var userBranchCode = await _context.Branches
                     .Where(b => b.Id == userBranchId)
@@ -217,7 +223,10 @@ namespace JustFlip.Controllers
                     return Unauthorized(new ErrorResponse(401, "UNAUTHORIZED", "Branch assignment missing from authentication token."));
                 }
 
-                int userBranchId = int.Parse(branchIdClaim);
+                if (!int.TryParse(branchIdClaim, out int userBranchId))
+                {
+                    return Unauthorized(new ErrorResponse(401, "UNAUTHORIZED", "Invalid branch claim."));
+                }
 
                 var row = await _context.EndDayReportRows
                     .Include(r => r.EndDayReport)
@@ -594,7 +603,7 @@ namespace JustFlip.Controllers
         }
 
         [HttpGet("get-all-reports")]
-        [OutputCache(PolicyName = "ReportsListCache", Tags = [ReportsCacheTag])]
+        [OutputCache(PolicyName = "ReportsListCache", Tags = new[] { ReportsCacheTag })]
         [ProducesResponseType(typeof(PagedEndDayReportResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status500InternalServerError)]
@@ -759,7 +768,7 @@ namespace JustFlip.Controllers
         }
 
         [HttpGet("{id:int}/details")]
-        [OutputCache(Duration = 300, Tags = [ReportsCacheTag])]
+        [OutputCache(Duration = 300, Tags = new[] { ReportsCacheTag })]
         [ProducesResponseType(typeof(EndDayReportDetailDto), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status403Forbidden)]

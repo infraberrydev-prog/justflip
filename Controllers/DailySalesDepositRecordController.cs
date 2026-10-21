@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.OutputCaching;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Org.BouncyCastle.Asn1.Ocsp;
 using System.Drawing;
 using System.IO.Compression;
@@ -23,13 +24,15 @@ namespace JustFlip.Controllers
     {
         private readonly JustFlipDbContext _context;
         private readonly IOutputCacheStore _cacheStore;
+        private readonly ILogger<DailySalesDepositRecordController> _logger;
 
         private const string ReportsCacheTag = "reports-cache-tag";
 
-        public DailySalesDepositRecordController(JustFlipDbContext context, IOutputCacheStore cacheStore)
+        public DailySalesDepositRecordController(JustFlipDbContext context, IOutputCacheStore cacheStore, ILogger<DailySalesDepositRecordController> logger)
         {
             _context = context;
             _cacheStore = cacheStore;
+            _logger = logger;
         }
 
         [HttpPost("save-report")]
@@ -106,7 +109,7 @@ namespace JustFlip.Controllers
         }
 
         [HttpGet("get-all-reports")]
-        [OutputCache(PolicyName = "ReportsListCache", Tags = [ReportsCacheTag])]
+        [OutputCache(PolicyName = "ReportsListCache", Tags = new[] { ReportsCacheTag })]
         [ProducesResponseType(typeof(PagedReportResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
@@ -133,7 +136,10 @@ namespace JustFlip.Controllers
                     return Unauthorized(new ErrorResponse(401, "UNAUTHORIZED", "Branch configuration missing from token."));
                 }
 
-                int userBranchId = int.Parse(branchIdClaim);
+                if (!int.TryParse(branchIdClaim, out int userBranchId))
+                {
+                    return Unauthorized(new ErrorResponse(401, "UNAUTHORIZED", "Invalid branch claim."));
+                }
 
                 if (page < 1) page = 1;
                 if (pageSize < 1) pageSize = 10;
@@ -262,7 +268,7 @@ namespace JustFlip.Controllers
         }
 
         [HttpGet("{id:int}/details")]
-        [OutputCache(Duration = 300, Tags = [ReportsCacheTag])]
+        [OutputCache(Duration = 300, Tags = new[] { ReportsCacheTag })]
         [ProducesResponseType(typeof(DailySalesDepositRecordDetailDto), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
@@ -327,7 +333,7 @@ namespace JustFlip.Controllers
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status403Forbidden)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
-        public async Task<IActionResult> UpdateSingleRow(int rowId, [FromBody] UpdateEndDayReportRowDto request)
+        public async Task<IActionResult> UpdateSingleRow(int rowId, [FromBody] AddSingleRowRequest request)
         {
             try
             {
@@ -342,70 +348,89 @@ namespace JustFlip.Controllers
                     return Unauthorized(new ErrorResponse(401, "UNAUTHORIZED", "Branch assignment missing from authentication token."));
                 }
 
-                int userBranchId = int.Parse(branchIdClaim);
+                if (!int.TryParse(branchIdClaim, out var userBranchId))
+                {
+                    return Unauthorized(new ErrorResponse(401, "UNAUTHORIZED", "Invalid branch claim."));
+                }
 
-                var row = await _context.EndDayReportRows
-                    .Include(r => r.EndDayReport)
+                var row = await _context.DailySalesDepositRecordRows
+                    .Include(r => r.DailySalesDepositRecord)
                     .FirstOrDefaultAsync(r => r.Id == rowId);
 
                 if (row == null)
                 {
-                    return NotFound(new ErrorResponse(404, "NOT_FOUND", $"End day report row with ID {rowId} was not found."));
+                    return NotFound(new ErrorResponse(404, "NOT_FOUND", $"Report row with ID {rowId} was not found."));
                 }
 
-                if (userRole != "Admin" && row.EndDayReport?.BranchId != userBranchId)
+                if (userRole != "Admin" && row.DailySalesDepositRecord?.BranchId != userBranchId)
                 {
                     return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to modify records from another branch."));
                 }
 
-                // 📝 Capture Old Values bago i-mutate ang entity
                 var oldValuesObj = new
                 {
-                    row.EmployeeName,
-                    row.GrossAmount,
+                    row.CashierName,
+                    row.ControlNo,
+                    row.DateOfTransaction,
+                    row.TotalGrossCash,
                     row.CreditCardPayment,
+                    row.SalaryAdvance,
                     row.Commission,
-                    row.SalonExpenses,
-                    row.SalaryAdvance
+                    row.Expenses,
+                    row.TotalExpenses,
+                    row.AmountDeposited,
+                    row.Remarks
                 };
 
-                // Track changed columns
                 var changedCols = new List<string>();
-                if (row.EmployeeName != request.EmployeeName) changedCols.Add("EmployeeName");
-                if (row.GrossAmount != request.GrossAmount) changedCols.Add("GrossAmount");
+                if (row.CashierName != request.CashierName) changedCols.Add("CashierName");
+                if (row.ControlNo != request.ControlNo) changedCols.Add("ControlNo");
+                if (row.DateOfTransaction != request.DateOfTransaction) changedCols.Add("DateOfTransaction");
+                if (row.TotalGrossCash != request.TotalGrossCash) changedCols.Add("TotalGrossCash");
                 if (row.CreditCardPayment != request.CreditCardPayment) changedCols.Add("CreditCardPayment");
-                if (row.Commission != request.Commission) changedCols.Add("Commission");
-                if (row.SalonExpenses != request.SalonExpenses) changedCols.Add("SalonExpenses");
                 if (row.SalaryAdvance != request.SalaryAdvance) changedCols.Add("SalaryAdvance");
+                if (row.Commission != request.Commission) changedCols.Add("Commission");
+                if (row.Expenses != request.Expenses) changedCols.Add("Expenses");
+                if (row.TotalExpenses != request.TotalExpenses) changedCols.Add("TotalExpenses");
+                if (row.AmountDeposited != request.AmountDeposited) changedCols.Add("AmountDeposited");
+                if (row.Remarks != request.Remarks) changedCols.Add("Remarks");
 
-                // Apply Updates
-                row.EmployeeName = request.EmployeeName;
-                row.GrossAmount = request.GrossAmount;
+                // Apply updates
+                row.CashierName = request.CashierName;
+                row.ControlNo = request.ControlNo;
+                row.DateOfTransaction = request.DateOfTransaction;
+                row.TotalGrossCash = request.TotalGrossCash;
                 row.CreditCardPayment = request.CreditCardPayment;
-                row.Commission = request.Commission;
-                row.SalonExpenses = request.SalonExpenses;
                 row.SalaryAdvance = request.SalaryAdvance;
+                row.Commission = request.Commission;
+                row.Expenses = request.Expenses;
+                row.TotalExpenses = request.TotalExpenses;
+                row.AmountDeposited = request.AmountDeposited;
+                row.Remarks = request.Remarks;
 
-                if (row.EndDayReport != null)
+                if (row.DailySalesDepositRecord != null)
                 {
-                    row.EndDayReport.LastDateUpdated = DateTime.UtcNow;
+                    row.DailySalesDepositRecord.LastDateUpdated = DateTime.UtcNow;
                 }
 
-                // Capture New Values
                 var newValuesObj = new
                 {
-                    row.EmployeeName,
-                    row.GrossAmount,
+                    row.CashierName,
+                    row.ControlNo,
+                    row.DateOfTransaction,
+                    row.TotalGrossCash,
                     row.CreditCardPayment,
+                    row.SalaryAdvance,
                     row.Commission,
-                    row.SalonExpenses,
-                    row.SalaryAdvance
+                    row.Expenses,
+                    row.TotalExpenses,
+                    row.AmountDeposited,
+                    row.Remarks
                 };
 
-                // 🛡️ Create AuditLog Record
                 var auditLog = new AuditLogs
                 {
-                    EntityName = nameof(EndDayReportRow),
+                    EntityName = nameof(DailySalesDepositRecordRow),
                     EntityId = row.Id,
                     Action = "UPDATE",
                     ModifiedBy = modifiedBy,

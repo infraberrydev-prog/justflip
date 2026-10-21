@@ -3,6 +3,7 @@ using JustFlip.DTO;
 using JustFlip.Models;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace JustFlip.Controllers
 {
@@ -12,11 +13,13 @@ namespace JustFlip.Controllers
     {
         private readonly JustFlipDbContext _context;
         private readonly IConfiguration _configuration;
+        private readonly ILogger<UserController> _logger;
 
-        public UserController(JustFlipDbContext context, IConfiguration configuration)
+        public UserController(JustFlipDbContext context, IConfiguration configuration, ILogger<UserController> logger)
         {
             _context = context;
             _configuration = configuration;
+            _logger = logger;
         }
 
         [HttpPost("create-user")]

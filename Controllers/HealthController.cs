@@ -1,5 +1,6 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using System.Reflection;
+using Microsoft.Extensions.Logging;
 
 namespace JustFlip.Controllers
 {
@@ -8,10 +9,12 @@ namespace JustFlip.Controllers
     public class HealthController : ControllerBase
     {
         private readonly JustFlipDbContext _context; // Palitan ng totoong DbContext class name mo
+        private readonly ILogger<HealthController> _logger;
 
-        public HealthController(JustFlipDbContext context)
+        public HealthController(JustFlipDbContext context, ILogger<HealthController> logger)
         {
             _context = context;
+            _logger = logger;
         }
 
         [HttpGet]
