@@ -253,7 +253,8 @@ namespace JustFlip.Controllers
                         r.Rows.Sum(row => row.Commission),
                         r.Rows.Sum(row => row.Expenses ?? 0),
                         r.Rows.Sum(row => row.TotalExpenses),
-                        r.Rows.Sum(row => row.AmountDeposited)
+                        r.Rows.Sum(row => row.AmountDeposited),
+                        r.LastDateUpdated
                     ))
                     .ToListAsync();
 
@@ -307,6 +308,7 @@ namespace JustFlip.Controllers
                     {
                         Id = row.Id,
                         CashierName = row.CashierName,
+                        ControlNo = row.ControlNo,
                         DateOfTransaction = row.DateOfTransaction,
                         TotalGrossCash = row.TotalGrossCash,
                         CreditCardPayment = row.CreditCardPayment,

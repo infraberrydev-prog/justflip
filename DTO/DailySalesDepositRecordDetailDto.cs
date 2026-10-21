@@ -13,6 +13,7 @@
     {
         public int Id { get; set; }
         public required string CashierName { get; set; }
+        public string ControlNo { get; set; } = string.Empty;
         public DateOnly DateOfTransaction { get; set; }
         public decimal TotalGrossCash { get; set; }
         public decimal? CreditCardPayment { get; set; }

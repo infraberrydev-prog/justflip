@@ -19,6 +19,7 @@
         decimal TotalCommission,
         decimal TotalExpenses,
         decimal TotalAmountExpenses,
-        decimal TotalAmountDeposited
+        decimal TotalAmountDeposited,
+        DateTime? LastDateUpdated
     );
 }
