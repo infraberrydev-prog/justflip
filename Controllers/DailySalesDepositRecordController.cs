@@ -147,8 +147,8 @@ namespace JustFlip.Controllers
                 // 2. Base query: I-load ang records
                 var query = _context.DailySalesDepositRecords.AsNoTracking();
 
-                // 🔒 Multi-Branch Security Filter: Kung hindi Admin, sariling branch data lang ang puwedeng lumabas
-                if (userRole != "Admin")
+                // 🔒 Multi-Branch Security Filter
+                if (!string.IsNullOrWhiteSpace(userRole))
                 {
                     query = query.Where(r => r.BranchId == userBranchId);
                 }
@@ -293,7 +293,7 @@ namespace JustFlip.Controllers
                 }
 
                 // 3. SECURITY CHECK: Siguraduhin na hindi ma-pe-peek ng ibang branch ang data ng iba
-                if (userRole != "Admin" && record.BranchId != userBranchId)
+                if (!string.IsNullOrWhiteSpace(userRole) && record.BranchId != userBranchId)
                 {
                     return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to view reports from other branches."));
                 }
@@ -364,7 +364,7 @@ namespace JustFlip.Controllers
                     return NotFound(new ErrorResponse(404, "NOT_FOUND", $"Report row with ID {rowId} was not found."));
                 }
 
-                if (userRole != "Admin" && row.DailySalesDepositRecord?.BranchId != userBranchId)
+                if (!string.IsNullOrWhiteSpace(userRole) && row.DailySalesDepositRecord?.BranchId != userBranchId)
                 {
                     return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to modify records from another branch."));
                 }
@@ -493,7 +493,7 @@ namespace JustFlip.Controllers
                 }
 
                 // 2. Authorization Check
-                if (userRole != "Admin" && parentRecord.BranchCode != userBranchCode)
+                if (!string.IsNullOrWhiteSpace(userRole) && parentRecord.BranchCode != userBranchCode)
                 {
                     return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to delete reports belonging to another branch."));
                 }
@@ -617,7 +617,7 @@ namespace JustFlip.Controllers
                 }
 
                 // 2. Authorization Check
-                if (userRole != "Admin" && record.BranchCode != userBranchCode)
+                if (!string.IsNullOrWhiteSpace(userRole) && record.BranchCode != userBranchCode)
                 {
                     return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to modify records belonging to another branch."));
                 }
@@ -715,7 +715,7 @@ namespace JustFlip.Controllers
                     return NotFound(new ErrorResponse(404, "NOT_FOUND", $"The daily sales deposit report with ID {reportId} was not found."));
                 }
 
-                if (userRole != "Admin" && parentReport.BranchId != userBranchId)
+                if (!string.IsNullOrWhiteSpace(userRole) && parentReport.BranchId != userBranchId)
                 {
                     return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to add rows to another branch's report."));
                 }
@@ -817,7 +817,7 @@ namespace JustFlip.Controllers
                 .Include(r => r.Rows)
                 .Where(r => request.ReportIds.Contains(r.Id));
 
-            if (userRole != "Admin")
+            if (!string.IsNullOrWhiteSpace(userRole))
             {
                 query = query.Where(r => r.BranchId == userBranchId);
             }

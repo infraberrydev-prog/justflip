@@ -98,7 +98,7 @@ namespace JustFlip.Controllers
                     }
 
                     // 🔒 Multi-Branch Security Check
-                    if (userRole != "Admin" && report.BranchId != userBranchId)
+                    if (!string.IsNullOrWhiteSpace(userRole) && report.BranchId != userBranchId)
                     {
                         return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to modify reports from another branch."));
                     }
@@ -237,7 +237,7 @@ namespace JustFlip.Controllers
                     return NotFound(new ErrorResponse(404, "NOT_FOUND", $"End day report row with ID {rowId} was not found."));
                 }
 
-                if (userRole != "Admin" && row.EndDayReport?.BranchId != userBranchId)
+                if (!string.IsNullOrWhiteSpace(userRole) && row.EndDayReport?.BranchId != userBranchId)
                 {
                     return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to modify records from another branch."));
                 }
@@ -336,7 +336,7 @@ namespace JustFlip.Controllers
                     return NotFound(new ErrorResponse(404, "NOT_FOUND", $"The master report with ID {reportId} was not found."));
                 }
 
-                if (userRole != "Admin" && parentReport.BranchId != userBranchId)
+                if (!string.IsNullOrWhiteSpace(userRole) && parentReport.BranchId != userBranchId)
                 {
                     return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to add rows to another branch's report."));
                 }
@@ -427,7 +427,7 @@ namespace JustFlip.Controllers
                 }
 
                 // 2. Authorization Check
-                if (userRole != "Admin" && row.EndDayReport?.BranchId != userBranchId)
+                if (!string.IsNullOrWhiteSpace(userRole) && row.EndDayReport?.BranchId != userBranchId)
                 {
                     return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to delete records belonging to another branch."));
                 }
@@ -521,7 +521,7 @@ namespace JustFlip.Controllers
                 }
 
                 // 2. Authorization Check
-                if (userRole != "Admin" && report.BranchId != userBranchId)
+                if (!string.IsNullOrWhiteSpace(userRole) && report.BranchId != userBranchId)
                 {
                     return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to delete reports belonging to another branch."));
                 }
@@ -639,7 +639,7 @@ namespace JustFlip.Controllers
                 var query = _context.EndDayReports.AsNoTracking();
 
                 // 🔒 Multi-Branch Security Filter
-                if (userRole != "Admin")
+                if (!string.IsNullOrWhiteSpace(userRole))
                 {
                     query = query.Where(r => r.BranchId == userBranchId);
                 }
@@ -801,7 +801,7 @@ namespace JustFlip.Controllers
                 }
 
                 // 3. 🔒 Security Check: Siguraduhin na hindi ma-pe-peek ng ibang branch ang data
-                if (userRole != "Admin" && report.BranchId != userBranchId)
+                if (report.BranchId != userBranchId)
                 {
                     return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to view end day reports belonging to another branch."));
                 }
@@ -886,7 +886,7 @@ namespace JustFlip.Controllers
             }
 
             // 2. Branch Authorization Filter
-            if (userRole != "Admin")
+            if (!string.IsNullOrWhiteSpace(userRole))
             {
                 var unauthorizedReports = reports.Where(r => r.BranchId != userBranchId).ToList();
                 if (unauthorizedReports.Any())
