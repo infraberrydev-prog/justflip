@@ -13,6 +13,7 @@ namespace JustFlip.DTO
         public string PhoneNumber { get; set; } = string.Empty;
         public bool IsTwoFactorEnabled { get; set; } = true;
         public int BranchId { get; set; }
+        public int RoleId { get; set; }
     }
 
     public class CreateUserValidator : AbstractValidator<CreateUserDto>

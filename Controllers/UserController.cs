@@ -54,7 +54,7 @@ namespace JustFlip.Controllers
                     PasswordHash = secureHash,
                     FirstName = dto.FirstName,
                     LastName = dto.LastName,
-                    RoleId = 1,
+                    RoleId = dto.RoleId,
                     IsActive = true,
                     CreatedAt = cleanCreatedAt,
                     PhoneNumber = dto.PhoneNumber,

@@ -17,7 +17,7 @@ namespace JustFlip.Models
 
         public string LastName { get; set; } = null!;
 
-        public int RoleId { get; set; }
+        public int RoleId { get; set; } = 1;
 
         public bool? IsActive { get; set; }
 

@@ -609,6 +609,7 @@ namespace JustFlip.Controllers
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status500InternalServerError)]
         public async Task<IActionResult> GetAllEndDayReports(
             [FromQuery] string? search,
+            [FromQuery] string? branchName,
             [FromQuery] DateOnly? startDateCreated,
             [FromQuery] DateOnly? endDateCreated,
             [FromQuery] decimal? minRevenue,
@@ -639,9 +640,13 @@ namespace JustFlip.Controllers
                 var query = _context.EndDayReports.AsNoTracking();
 
                 // 🔒 Multi-Branch Security Filter
-                if (!string.IsNullOrWhiteSpace(userRole))
+                if (!string.IsNullOrWhiteSpace(userRole) && userRole != "SuperUser")
                 {
                     query = query.Where(r => r.BranchId == userBranchId);
+                }
+                else if (!string.IsNullOrWhiteSpace(branchName))
+                {
+                    query = query.Where(r => r.BranchCode.ToLower().Contains(branchName.ToLower()));
                 }
 
                 // 3. Search Filter (by Report Name)
@@ -753,7 +758,8 @@ namespace JustFlip.Controllers
                                           - (row.SalonExpenses ?? 0)
                                           - (row.SalaryAdvance ?? 0)),
                         r.CreatedAt.ToString("MMM d, yyyy - HH:mm:ss"),
-                        r.LastDateUpdated.HasValue ? r.LastDateUpdated.Value.ToString("MMM d, yyyy - HH:mm:ss") : "—"
+                        r.LastDateUpdated.HasValue ? r.LastDateUpdated.Value.ToString("MMM d, yyyy - HH:mm:ss") : "—",
+                        r.BranchCode
                     ))
                     .ToListAsync();
 

@@ -1,6 +1,5 @@
 ﻿using JustFlip.Models;
 using JustFlip;
-using JustFlip.Models;
 using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
@@ -23,7 +22,12 @@ namespace JustFlip.Class
             var tokenHandler = new JwtSecurityTokenHandler();
             var key = Encoding.UTF8.GetBytes(_configuration["Jwt:Key"]!);
 
-            var userRole = user.RoleId == 1 ? "Admin" : "Staff";
+            var userRole = user.RoleId switch
+            {
+                3 => "SuperUser",
+                1 => "Admin",
+                _ => "Staff"
+            };
 
             var claims = new List<Claim>
             {

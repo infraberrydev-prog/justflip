@@ -115,6 +115,7 @@ namespace JustFlip.Controllers
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
         public async Task<IActionResult> GetRecords(
             [FromQuery] string? search,
+            [FromQuery] string? branchName,
             [FromQuery] DateOnly? startDateCreated,
             [FromQuery] DateOnly? endDateCreated,
             [FromQuery] decimal? minRevenue,
@@ -148,9 +149,13 @@ namespace JustFlip.Controllers
                 var query = _context.DailySalesDepositRecords.AsNoTracking();
 
                 // 🔒 Multi-Branch Security Filter
-                if (!string.IsNullOrWhiteSpace(userRole))
+                if (!string.IsNullOrWhiteSpace(userRole) && userRole != "SuperUser")
                 {
                     query = query.Where(r => r.BranchId == userBranchId);
+                }
+                else if (!string.IsNullOrWhiteSpace(branchName))
+                {
+                    query = query.Where(r => r.BranchCode.ToLower().Contains(branchName.ToLower()));
                 }
 
                 // 3. Search Filter (by Report Name)
@@ -254,7 +259,8 @@ namespace JustFlip.Controllers
                         r.Rows.Sum(row => row.Expenses ?? 0),
                         r.Rows.Sum(row => row.TotalExpenses),
                         r.Rows.Sum(row => row.AmountDeposited),
-                        r.LastDateUpdated
+                        r.LastDateUpdated,
+                        r.BranchCode
                     ))
                     .ToListAsync();
 

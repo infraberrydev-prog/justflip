@@ -13,7 +13,8 @@
         decimal SalaryAdvance,
         decimal TotalCashInRegister,
         string DateCreated,       // e.g., "Jan 9, 2026 - 08:30:22"
-        string LastUpdated        // e.g., "Jan 9, 2026 - 09:15:00" o "—"
+        string LastUpdated,        // e.g., "Jan 9, 2026 - 09:15:00" o "—"
+        string BranchName
     );
 
     // Paged Wrapper Response

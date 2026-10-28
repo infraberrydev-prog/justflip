@@ -17,5 +17,6 @@
 
         public string DateAndTimeCreated { get; set; } // Match sa UI column timestamp
         public string? LastUpdated { get; set; } = "—";
+        public string? BranchName { get; set; }
     }
 }

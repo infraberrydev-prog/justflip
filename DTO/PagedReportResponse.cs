@@ -20,6 +20,7 @@
         decimal TotalExpenses,
         decimal TotalAmountExpenses,
         decimal TotalAmountDeposited,
-        DateTime? LastDateUpdated
+        DateTime? LastDateUpdated,
+        string? BranchName = null
     );
 }
