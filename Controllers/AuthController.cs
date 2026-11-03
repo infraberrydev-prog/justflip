@@ -24,11 +24,11 @@ namespace JustFlip.Controllers
         private readonly IOutputCacheStore _cacheStore;
         private readonly ILogger<AuthController> _logger;
 
-        public AuthController(JustFlipDbContext context, IConfiguration configuration, IOutputCacheStore cacheStore, ILogger<AuthController> logger)
+        public AuthController(JustFlipDbContext context, IConfiguration configuration, IOutputCacheStore cacheStore, ILogger<AuthController> logger, IHttpClientFactory httpClientFactory)
         {
             _context = context;
             _configuration = configuration;
-            _sendOTP = new SendEmailOtp(configuration);
+            _sendOTP = new SendEmailOtp(configuration, httpClientFactory);
             _generateToken = new GenerateTokenJwt(context, configuration);
             _cacheStore = cacheStore;
             _logger = logger;

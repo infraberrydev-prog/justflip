@@ -42,6 +42,16 @@ namespace JustFlip.Controllers
                     ));
                 }
 
+                var userRole = await _context.Roles.FirstOrDefaultAsync(r => r.Id == dto.RoleId);
+                if(userRole == null)
+                {
+                    return BadRequest(new ErrorResponse(
+                        statusCode: 400,
+                        errorType: "ROLE_NOT_FOUND",
+                        message: "The specified role does not exist."
+                    ));
+                }
+
                 string secureHash = BCrypt.Net.BCrypt.HashPassword(dto.Password);
 
                 var now = DateTime.UtcNow;
@@ -65,7 +75,7 @@ namespace JustFlip.Controllers
                 _context.Users.Add(newUser);
                 await _context.SaveChangesAsync();
 
-                return Ok(new { message = "Admin user successfully created via secure API!" });
+                return Ok(new { message = $"{userRole.Name} user successfully created!" });
             }
             catch (Exception ex)
             {
