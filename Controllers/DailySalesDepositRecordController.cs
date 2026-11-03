@@ -801,6 +801,7 @@ namespace JustFlip.Controllers
             }
         }
 
+
         [HttpPost("download")]
         [EnableRateLimiting("DownloadPolicy")]
         [ProducesResponseType(StatusCodes.Status200OK)]
@@ -808,91 +809,129 @@ namespace JustFlip.Controllers
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status403Forbidden)]
         [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
-        public async Task<IActionResult> DownloadSalesDepositReports([FromBody] DownloadReportsRequest request)
+        public async Task<IActionResult> DownloadSalesDepositReports(
+            [FromBody] DownloadReportsRequest request)
         {
             if (request?.ReportIds == null || !request.ReportIds.Any())
             {
-                return BadRequest(new ErrorResponse(400, "INVALID_REQUEST", "Please select at least one report to download."));
+                return BadRequest(new ErrorResponse(
+                    400, "INVALID_REQUEST",
+                    "Please select at least one report to download."
+                ));
             }
 
-            // 1. Multi-Branch Security Verification
-            var userRole = User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value;
-            var branchIdClaim = User.FindFirst("BranchId")?.Value;
+            // 1. Get authenticated user claims
+            var userRole = User.FindFirst(
+                System.Security.Claims.ClaimTypes.Role)?.Value;
 
-            if (string.IsNullOrEmpty(branchIdClaim))
+            bool isSuperUser = userRole == "SuperUser";
+
+            // 2. Validate role
+            if (string.IsNullOrWhiteSpace(userRole))
             {
-                return Unauthorized(new ErrorResponse(401, "UNAUTHORIZED", "Branch assignment missing from authentication token."));
+                return StatusCode(403, new ErrorResponse(
+                    403, "FORBIDDEN",
+                    "User role is missing from authentication token."
+                ));
             }
 
-            int userBranchId = int.Parse(branchIdClaim);
+            // 3. Get BranchId only for non-SuperUsers
+            int userBranchId = 0;
 
-            // 2. Fetch Reports & Filter sa BranchId ng User (kung hindi Admin)
+            if (!isSuperUser)
+            {
+                var branchIdClaim = User.FindFirst("BranchId")?.Value;
+
+                if (!int.TryParse(branchIdClaim, out userBranchId))
+                {
+                    return Unauthorized(new ErrorResponse(
+                        401, "UNAUTHORIZED",
+                        "Valid branch assignment is missing from authentication token."
+                    ));
+                }
+            }
+
+            // 4. Fetch selected reports
+            var reportIds = request.ReportIds.Distinct().ToList();
+
             var query = _context.DailySalesDepositRecords
                 .Include(r => r.Rows)
-                .Where(r => request.ReportIds.Contains(r.Id));
+                .Where(r => reportIds.Contains(r.Id));
 
-            if (!string.IsNullOrWhiteSpace(userRole))
+            // 🔒 Multi-Branch Security Filter
+            // SuperUser = All branches
+            // Other users = Assigned branch only
+            if (!isSuperUser)
             {
                 query = query.Where(r => r.BranchId == userBranchId);
             }
 
             var reports = await query.ToListAsync();
 
-            // 🔒 Multi-Branch Security Filter
-            if (!string.IsNullOrWhiteSpace(userRole) && userRole == "SuperUser")
+            // 5. Ensure ALL selected reports are accessible
+            // Prevent partial downloads of unauthorized reports
+            if (reports.Count != reportIds.Count)
             {
-                goto e;
+                return NotFound(new ErrorResponse(
+                    404, "NOT_FOUND",
+                    "Some selected reports do not exist or you do not have permission to access them."
+                ));
             }
 
-            // 2. Branch Authorization Filter
-            if (!string.IsNullOrWhiteSpace(userRole))
-            {
-                var unauthorizedReports = reports.Where(r => r.BranchId != userBranchId).ToList();
-                if (unauthorizedReports.Any())
-                {
-                    return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to download reports from another branch."));
-                }
-            }
-
-            if (!reports.Any())
-            {
-                return NotFound(new ErrorResponse(404, "NOT_FOUND", "No matching reports found for the selected IDs or you do not have permission to access them."));
-            }
-        e:
-            // 3. KAPAG ISA LANG ANG SINELECT
+            // 6. Single report download
             if (reports.Count == 1)
             {
                 var report = reports.First();
-                var fileBytes = GenerateReportExcelBytes(report);
-                string fileName = $"{SanitizeFileName(report.ReportName)}.xlsx";
 
-                return File(fileBytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fileName);
+                var fileBytes = GenerateReportExcelBytes(report);
+
+                string fileName =
+                    $"{SanitizeFileName(report.ReportName)}.xlsx";
+
+                return File(
+                    fileBytes,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    fileName
+                );
             }
 
-            // 4. KAPAG MULTIPLE ANG SINELECT (ZIP Download)
+            // 7. Multiple reports - ZIP download
             using (var zipStream = new MemoryStream())
             {
-                using (var archive = new ZipArchive(zipStream, ZipArchiveMode.Create, true))
+                using (var archive = new ZipArchive(
+                    zipStream, ZipArchiveMode.Create, true))
                 {
                     foreach (var report in reports)
                     {
                         var fileBytes = GenerateReportExcelBytes(report);
-                        var entryName = $"{SanitizeFileName(report.ReportName)}_{report.Id}.xlsx";
 
-                        var entry = archive.CreateEntry(entryName, CompressionLevel.Fastest);
+                        var entryName =
+                            $"{SanitizeFileName(report.ReportName)}_{report.Id}.xlsx";
+
+                        var entry = archive.CreateEntry(
+                            entryName, CompressionLevel.Fastest);
+
                         using (var entryStream = entry.Open())
                         {
-                            await entryStream.WriteAsync(fileBytes, 0, fileBytes.Length);
+                            await entryStream.WriteAsync(
+                                fileBytes, 0, fileBytes.Length);
                         }
                     }
                 }
 
                 zipStream.Position = 0;
-                string zipFileName = $"JustFlip_Daily_Sales_Deposit_Reports_{DateTime.UtcNow:yyyyMMdd_HHmmss}.zip";
 
-                return File(zipStream.ToArray(), "application/zip", zipFileName);
+                string zipFileName =
+                    $"JustFlip_Daily_Sales_Deposit_Reports_{DateTime.UtcNow:yyyyMMdd_HHmmss}.zip";
+
+                return File(
+                    zipStream.ToArray(),
+                    "application/zip",
+                    zipFileName
+                );
             }
         }
+
 
         // ==========================================
         // HELPER METHODS FOR EXCEL GENERATION
