@@ -806,12 +806,18 @@ namespace JustFlip.Controllers
                     return NotFound(new ErrorResponse(404, "NOT_FOUND", $"The requested end day report with ID {id} does not exist."));
                 }
 
+                // 🔒 Multi-Branch Security Filter
+                if (!string.IsNullOrWhiteSpace(userRole) && userRole == "SuperUser")
+                {
+                    goto e;
+                }
+
                 // 3. 🔒 Security Check: Siguraduhin na hindi ma-pe-peek ng ibang branch ang data
                 if (report.BranchId != userBranchId)
                 {
                     return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to view end day reports belonging to another branch."));
                 }
-
+            e:
                 // 4. Transform at Mapped Details Response
                 var mappedRows = report.Rows.Select(row => new EndDayReportRowDetailDto(
                     row.Id,
@@ -828,6 +834,7 @@ namespace JustFlip.Controllers
                 {
                     Id = report.Id,
                     FormattedReportId = $"ED{report.Id:D5}",
+                    BranchName = report.BranchCode,
                     ReportName = report.ReportName,
                     DateOfReport = report.DateOfReport.ToString("MMM dd, yyyy"),
                     CashierName = report.CashierName,
@@ -891,6 +898,12 @@ namespace JustFlip.Controllers
                 return NotFound(new ErrorResponse(404, "NOT_FOUND", "No matching end day reports found for the selected IDs."));
             }
 
+            // 🔒 Multi-Branch Security Filter
+            if (!string.IsNullOrWhiteSpace(userRole) && userRole == "SuperUser")
+            {
+                goto e;
+            }
+
             // 2. Branch Authorization Filter
             if (!string.IsNullOrWhiteSpace(userRole))
             {
@@ -901,6 +914,7 @@ namespace JustFlip.Controllers
                 }
             }
 
+        e:
             // ==========================================
             // CASE A: SINGLE REPORT SELECTED (.xlsx)
             // ==========================================
@@ -960,6 +974,7 @@ namespace JustFlip.Controllers
                 // 2. Exact Column Headers mula sa UI
                 string[] headers = new string[]
                 {
+                    "Branch Name",
                     "Cashier Name",
                     "Date of Transaction",
                     "Total Gross (Cash)",
@@ -989,49 +1004,52 @@ namespace JustFlip.Controllers
                 int currentRow = 5;
                 foreach (var row in report.Rows)
                 {
+                    // Branch Name
+                    worksheet.Cell(currentRow, 1).Value = row.BranchCode;
+
                     // Employee Name / Cashier
-                    worksheet.Cell(currentRow, 1).Value = string.IsNullOrWhiteSpace(row.EmployeeName) ? report.CashierName : row.EmployeeName;
+                    worksheet.Cell(currentRow, 2).Value = string.IsNullOrWhiteSpace(row.EmployeeName) ? report.CashierName : row.EmployeeName;
 
                     // Date of Transaction (gamit ang DateOfReport ng parent report)
-                    worksheet.Cell(currentRow, 2).Value = report.DateOfReport.ToString("MMM d, yyyy");
+                    worksheet.Cell(currentRow, 3).Value = report.DateOfReport.ToString("MMM d, yyyy");
 
                     // Total Gross (Cash) -> GrossAmount
-                    worksheet.Cell(currentRow, 3).Value = row.GrossAmount;
-                    worksheet.Cell(currentRow, 3).Style.NumberFormat.Format = "₱#,##0.00";
+                    worksheet.Cell(currentRow, 4).Value = row.GrossAmount;
+                    worksheet.Cell(currentRow, 4).Style.NumberFormat.Format = "₱#,##0.00";
 
                     // Credit Card Payment
-                    worksheet.Cell(currentRow, 4).Value = row.CreditCardPayment.HasValue && row.CreditCardPayment.Value > 0 ? row.CreditCardPayment.Value : "—";
+                    worksheet.Cell(currentRow, 5).Value = row.CreditCardPayment.HasValue && row.CreditCardPayment.Value > 0 ? row.CreditCardPayment.Value : "—";
                     if (row.CreditCardPayment.HasValue && row.CreditCardPayment.Value > 0)
-                        worksheet.Cell(currentRow, 4).Style.NumberFormat.Format = "₱#,##0.00";
+                        worksheet.Cell(currentRow, 5).Style.NumberFormat.Format = "₱#,##0.00";
 
                     // Total Amount Deposited (Calculated cash deposited value)
                     decimal amountDeposited = row.GrossAmount - (row.CreditCardPayment ?? 0);
-                    worksheet.Cell(currentRow, 5).Value = amountDeposited;
-                    worksheet.Cell(currentRow, 5).Style.NumberFormat.Format = "₱#,##0.00";
+                    worksheet.Cell(currentRow, 6).Value = amountDeposited;
+                    worksheet.Cell(currentRow, 6).Style.NumberFormat.Format = "₱#,##0.00";
 
                     // Salary Advance
-                    worksheet.Cell(currentRow, 6).Value = row.SalaryAdvance.HasValue && row.SalaryAdvance.Value > 0 ? row.SalaryAdvance.Value : "—";
+                    worksheet.Cell(currentRow, 7).Value = row.SalaryAdvance.HasValue && row.SalaryAdvance.Value > 0 ? row.SalaryAdvance.Value : "—";
                     if (row.SalaryAdvance.HasValue && row.SalaryAdvance.Value > 0)
-                        worksheet.Cell(currentRow, 6).Style.NumberFormat.Format = "₱#,##0.00";
-
-                    // Commission
-                    worksheet.Cell(currentRow, 7).Value = row.Commission > 0 ? row.Commission : "—";
-                    if (row.Commission > 0)
                         worksheet.Cell(currentRow, 7).Style.NumberFormat.Format = "₱#,##0.00";
 
-                    // Expenses / SalonExpenses
-                    worksheet.Cell(currentRow, 8).Value = row.SalonExpenses.HasValue && row.SalonExpenses.Value > 0 ? row.SalonExpenses.Value : "—";
-                    if (row.SalonExpenses.HasValue && row.SalonExpenses.Value > 0)
+                    // Commission
+                    worksheet.Cell(currentRow, 8).Value = row.Commission > 0 ? row.Commission : "—";
+                    if (row.Commission > 0)
                         worksheet.Cell(currentRow, 8).Style.NumberFormat.Format = "₱#,##0.00";
+
+                    // Expenses / SalonExpenses
+                    worksheet.Cell(currentRow, 9).Value = row.SalonExpenses.HasValue && row.SalonExpenses.Value > 0 ? row.SalonExpenses.Value : "—";
+                    if (row.SalonExpenses.HasValue && row.SalonExpenses.Value > 0)
+                        worksheet.Cell(currentRow, 9).Style.NumberFormat.Format = "₱#,##0.00";
 
                     // Total Expenses
                     decimal totalExpenses = (row.SalonExpenses ?? 0) + (row.SalaryAdvance ?? 0);
-                    worksheet.Cell(currentRow, 9).Value = totalExpenses > 0 ? totalExpenses : "—";
+                    worksheet.Cell(currentRow, 10).Value = totalExpenses > 0 ? totalExpenses : "—";
                     if (totalExpenses > 0)
-                        worksheet.Cell(currentRow, 9).Style.NumberFormat.Format = "₱#,##0.00";
+                        worksheet.Cell(currentRow, 10).Style.NumberFormat.Format = "₱#,##0.00";
 
                     // Remarks
-                    worksheet.Cell(currentRow, 10).Value = "—";
+                    worksheet.Cell(currentRow, 11).Value = "—";
 
                     // Total Amount (Net Take)
                     decimal totalAmount = row.GrossAmount
@@ -1040,8 +1058,8 @@ namespace JustFlip.Controllers
                                         - (row.SalonExpenses ?? 0)
                                         - (row.SalaryAdvance ?? 0);
 
-                    worksheet.Cell(currentRow, 11).Value = totalAmount;
-                    worksheet.Cell(currentRow, 11).Style.NumberFormat.Format = "₱#,##0.00";
+                    worksheet.Cell(currentRow, 12).Value = totalAmount;
+                    worksheet.Cell(currentRow, 12).Style.NumberFormat.Format = "₱#,##0.00";
 
                     // Row Borders Styling
                     for (int col = 1; col <= headers.Length; col++)

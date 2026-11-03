@@ -17,6 +17,7 @@
     {
         public int Id { get; set; }
         public string FormattedReportId { get; set; } = string.Empty; // e.g., "ED05234"
+        public string BranchName { get; set; } = string.Empty;
         public string ReportName { get; set; } = string.Empty;
         public string DateOfReport { get; set; } = string.Empty;
         public string CashierName { get; set; } = string.Empty;

@@ -5,6 +5,7 @@
         public int Id { get; set; }
         public string ReportId => $"DS{Id:D5}";
         public required string ReportName { get; set; }
+        public string BranchName { get; set; } = string.Empty;
         public DateTime CreatedAt { get; set; }
         public List<SalesRecordRowDetailDto> Rows { get; set; } = [];
     }

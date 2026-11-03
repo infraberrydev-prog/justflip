@@ -298,17 +298,25 @@ namespace JustFlip.Controllers
                     return NotFound(new { message = "The requested report does not exist." });
                 }
 
+                // 🔒 Multi-Branch Security Filter
+                if (!string.IsNullOrWhiteSpace(userRole) && userRole == "SuperUser")
+                {
+                    goto e;
+                }
+
                 // 3. SECURITY CHECK: Siguraduhin na hindi ma-pe-peek ng ibang branch ang data ng iba
                 if (!string.IsNullOrWhiteSpace(userRole) && record.BranchId != userBranchId)
                 {
                     return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to view reports from other branches."));
                 }
 
+                e:
                 // 4. I-map ang nakuha nating Data papunta sa Detailed DTO
                 var detailDto = new DailySalesDepositRecordDetailDto
                 {
                     Id = record.Id,
                     ReportName = record.ReportName,
+                    BranchName = record.BranchCode,
                     CreatedAt = record.CreatedAt,
                     Rows = record.Rows.Select(row => new SalesRecordRowDetailDto
                     {
@@ -830,6 +838,24 @@ namespace JustFlip.Controllers
 
             var reports = await query.ToListAsync();
 
+            // 🔒 Multi-Branch Security Filter
+            if (!string.IsNullOrWhiteSpace(userRole) && userRole == "SuperUser")
+            {
+                goto e;
+            }
+
+            // 2. Branch Authorization Filter
+            if (!string.IsNullOrWhiteSpace(userRole))
+            {
+                var unauthorizedReports = reports.Where(r => r.BranchId != userBranchId).ToList();
+                if (unauthorizedReports.Any())
+                {
+                    return StatusCode(403, new ErrorResponse(403, "FORBIDDEN", "You are not authorized to download reports from another branch."));
+                }
+            }
+
+        e:
+
             if (!reports.Any())
             {
                 return NotFound(new ErrorResponse(404, "NOT_FOUND", "No matching reports found for the selected IDs or you do not have permission to access them."));
@@ -890,6 +916,7 @@ namespace JustFlip.Controllers
                 // 2. Exact Table Headers batay sa UI Layout
                 string[] headers = new string[]
                 {
+                    "Branch Name",
                     "Cashier Name",
                     "Date of Transaction",
                     "Total Gross (Cash)",
@@ -917,42 +944,45 @@ namespace JustFlip.Controllers
                 int currentRow = 5;
                 foreach (var row in report.Rows)
                 {
+                    // Branch Name
+                    worksheet.Cell(currentRow, 1).Value = row.BranchCode;
+
                     // Cashier Name
-                    worksheet.Cell(currentRow, 1).Value = row.CashierName;
+                    worksheet.Cell(currentRow, 2).Value = row.CashierName;
 
                     // Date of Transaction (e.g., Mar 1, 2026)
-                    worksheet.Cell(currentRow, 2).Value = row.DateOfTransaction.ToString("MMM d, yyyy");
+                    worksheet.Cell(currentRow, 3).Value = row.DateOfTransaction.ToString("MMM d, yyyy");
 
                     // Total Gross (Cash)
-                    worksheet.Cell(currentRow, 3).Value = row.TotalGrossCash;
-                    worksheet.Cell(currentRow, 3).Style.NumberFormat.Format = "₱#,##0.00";
-
-                    // Credit Card Payment
-                    worksheet.Cell(currentRow, 4).Value = row.CreditCardPayment ?? 0;
+                    worksheet.Cell(currentRow, 4).Value = row.TotalGrossCash;
                     worksheet.Cell(currentRow, 4).Style.NumberFormat.Format = "₱#,##0.00";
 
-                    // Total Amount Deposited
-                    worksheet.Cell(currentRow, 5).Value = row.AmountDeposited;
+                    // Credit Card Payment
+                    worksheet.Cell(currentRow, 5).Value = row.CreditCardPayment ?? 0;
                     worksheet.Cell(currentRow, 5).Style.NumberFormat.Format = "₱#,##0.00";
 
-                    // Salary Advance
-                    worksheet.Cell(currentRow, 6).Value = row.SalaryAdvance ?? 0;
+                    // Total Amount Deposited
+                    worksheet.Cell(currentRow, 6).Value = row.AmountDeposited;
                     worksheet.Cell(currentRow, 6).Style.NumberFormat.Format = "₱#,##0.00";
 
-                    // Commission
-                    worksheet.Cell(currentRow, 7).Value = row.Commission;
+                    // Salary Advance
+                    worksheet.Cell(currentRow, 7).Value = row.SalaryAdvance ?? 0;
                     worksheet.Cell(currentRow, 7).Style.NumberFormat.Format = "₱#,##0.00";
 
-                    // Expenses
-                    worksheet.Cell(currentRow, 8).Value = row.Expenses ?? 0;
+                    // Commission
+                    worksheet.Cell(currentRow, 8).Value = row.Commission;
                     worksheet.Cell(currentRow, 8).Style.NumberFormat.Format = "₱#,##0.00";
 
-                    // Total Expenses
-                    worksheet.Cell(currentRow, 9).Value = row.TotalExpenses;
+                    // Expenses
+                    worksheet.Cell(currentRow, 9).Value = row.Expenses ?? 0;
                     worksheet.Cell(currentRow, 9).Style.NumberFormat.Format = "₱#,##0.00";
 
+                    // Total Expenses
+                    worksheet.Cell(currentRow, 10).Value = row.TotalExpenses;
+                    worksheet.Cell(currentRow, 10).Style.NumberFormat.Format = "₱#,##0.00";
+
                     // Remarks
-                    worksheet.Cell(currentRow, 10).Value = string.IsNullOrWhiteSpace(row.Remarks) ? "—" : row.Remarks;
+                    worksheet.Cell(currentRow, 11).Value = string.IsNullOrWhiteSpace(row.Remarks) ? "—" : row.Remarks;
 
                     // Gridlines at Borders
                     for (int col = 1; col <= headers.Length; col++)
