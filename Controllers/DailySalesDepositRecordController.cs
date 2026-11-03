@@ -854,13 +854,11 @@ namespace JustFlip.Controllers
                 }
             }
 
-        e:
-
             if (!reports.Any())
             {
                 return NotFound(new ErrorResponse(404, "NOT_FOUND", "No matching reports found for the selected IDs or you do not have permission to access them."));
             }
-
+        e:
             // 3. KAPAG ISA LANG ANG SINELECT
             if (reports.Count == 1)
             {

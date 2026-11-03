@@ -893,15 +893,14 @@ namespace JustFlip.Controllers
                 .Where(r => request.ReportIds.Contains(r.Id))
                 .ToListAsync();
 
-            if (!reports.Any())
-            {
-                return NotFound(new ErrorResponse(404, "NOT_FOUND", "No matching end day reports found for the selected IDs."));
-            }
-
-            // 🔒 Multi-Branch Security Filter
             if (!string.IsNullOrWhiteSpace(userRole) && userRole == "SuperUser")
             {
                 goto e;
+            }
+
+            if (!reports.Any())
+            {
+                return NotFound(new ErrorResponse(404, "NOT_FOUND", "No matching end day reports found for the selected IDs."));
             }
 
             // 2. Branch Authorization Filter
